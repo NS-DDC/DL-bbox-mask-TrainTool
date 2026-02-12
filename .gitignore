@@ -1,0 +1,50 @@
+# Python
+*.py[cod]
+*$py.class
+*.so
+__pycache__/
+*.egg-info/
+dist/
+build/
+*.egg
+.Python
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+
+# Config & User Data
+.visionace/
+*.json
+
+# Model files (too large for git)
+*.pt
+*.h5
+*.onnx
+*.weights
+
+# PyInstaller
+*.spec
+build/
+dist/
+
+# Test data
+test_images/
+samples/
+
+# Backup files
+*.bak
+*.tmp
