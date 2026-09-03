@@ -165,7 +165,7 @@ class HelpPanel(QWidget):
         if " : " in text:
             key, desc = text.split(" : ", 1)
             html = (
-                f'<span style="color:#ffd966; font-family:monospace; font-size:12px; font-weight:bold;">'
+                f'<span style="color:#ffd966; font-family:Noto Sans KR; font-size:12px; font-weight:bold;">'
                 f'{key}</span><br>'
                 f'<span style="color:#ffffff; font-size:11px;">{desc}</span>'
             )
@@ -207,7 +207,7 @@ class HelpPanel(QWidget):
         label.setWordWrap(True)
         label.setTextFormat(Qt.TextFormat.PlainText)
         label.setStyleSheet(
-            "color: #d0d0d0; font-size: 11px; font-family: monospace; "
+            "color: #d0d0d0; font-size: 11px; font-family: Noto Sans KR; "
             "padding: 2px 6px 8px 12px; background-color: #252525; "
             "border-left: 2px solid #444;"
         )

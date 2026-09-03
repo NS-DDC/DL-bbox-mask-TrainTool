@@ -5,7 +5,7 @@
 - 가져온 범위: 해당 커밋의 `DL-Tool/` 하위 소스만.
 - 개선판 저장소: [NS-DDC/DL-bbox-mask-TrainTool](https://github.com/NS-DDC/DL-bbox-mask-TrainTool)
 - 개선판 브랜치: `improvements/visionace-v1.9`
-- 개선판 태그: `v1.9.0-improved.1`
+- 개선판 태그: `v1.9.0-improved.2`
 - 대상 저장소의 기존 main 기준: `2d24e64641130bdee254fb281a5ad0ee396c1404`
 
 원본 `claude_code`의 브랜치·태그·릴리스는 수정하지 않았습니다. 다른 앱의 소스와 원본 저장소의 Git 이력을 개선판에 옮기지 않았습니다. 기존 main과 개선판은 브랜치로 구분합니다.

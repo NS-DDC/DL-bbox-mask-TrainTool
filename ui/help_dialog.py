@@ -119,7 +119,7 @@ class HelpDialog(QDialog):
         if " : " in text:
             key, desc = text.split(" : ", 1)
             html = (
-                f'<span style="color:#ffd966; font-family:monospace; font-size:12px; font-weight:bold;">'
+                f'<span style="color:#ffd966; font-family:Noto Sans KR; font-size:12px; font-weight:bold;">'
                 f'{key}</span>'
                 f'<span style="color:#888;"> &mdash; </span>'
                 f'<span style="color:#ffffff;">{desc}</span>'

@@ -10,7 +10,7 @@ def test_import_does_not_start_qt_or_load_models():
     # main keeps the expensive and GUI imports inside main(), not module scope.
     module = importlib.import_module("main")
     assert callable(module.main)
-    assert module.APP_VERSION == "1.9.0-improved.1"
+    assert module.APP_VERSION == "1.9.0-improved.2"
 
 
 def test_version_does_not_need_gui(monkeypatch, capsys):
@@ -47,3 +47,45 @@ def test_smoke_report_can_be_written_under_unicode_directory(tmp_path):
     target = tmp_path / "검증 결과" / "smoke.json"
     main._write_report(target, {"status": "failed", "error": "모델 없음"})
     assert json.loads(target.read_text(encoding="utf-8"))["error"] == "모델 없음"
+
+
+def test_bundled_font_covers_printable_ascii_and_all_modern_hangul():
+    import main
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    previous_font = app.font()
+    try:
+        family = main.configure_application_font(app)
+        report = main._verify_application_font(app)
+        assert report["registered_family"] == family
+        assert report["missing_glyphs"] == 0
+        assert report["ascii_glyphs_checked"] == 95
+        assert report["hangul_syllables_checked"] == 11172
+    finally:
+        app.setFont(previous_font)
+
+
+def test_missing_bundled_font_fails_startup(tmp_path):
+    import main
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    with pytest.raises(RuntimeError, match="Cannot load the bundled application font"):
+        main.configure_application_font(app, tmp_path / "missing-font.ttf")
+
+
+def test_missing_glyph_fails_the_smoke_gate(monkeypatch):
+    import main
+    from PySide6 import QtGui
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+
+    class MissingHangulMetrics:
+        def __init__(self, font):
+            pass
+
+        def inFontUcs4(self, point):
+            return point != 0xAC00
+
+    monkeypatch.setattr(QtGui, "QFontMetrics", MissingHangulMetrics)
+    with pytest.raises(RuntimeError, match="U\\+AC00"):
+        main._verify_application_font(app)

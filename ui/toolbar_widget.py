@@ -20,7 +20,7 @@ def _make_help_icon() -> QIcon:
     painter.drawEllipse(1, 1, size - 2, size - 2)
     # Question mark
     painter.setPen(QColor("#ffffff"))
-    font = QFont("Arial", 14, QFont.Weight.Bold)
+    font = QFont("Noto Sans KR", 14, QFont.Weight.Bold)
     painter.setFont(font)
     painter.drawText(QRect(0, -1, size, size), Qt.AlignmentFlag.AlignCenter, "?")
     painter.end()

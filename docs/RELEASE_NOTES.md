@@ -1,10 +1,10 @@
-# VisionAce Improved 1.9.0-improved.1
+# VisionAce Improved 1.9.0-improved.2
 
 `claude_code`의 **VisionAce v1.8.1**을 기준으로 만든 별도 개선판입니다. 개선 소스와 실행 파일은 `NS-DDC/DL-bbox-mask-TrainTool`에 배포합니다.
 
 ## 실행
 
-1. **VisionAce-Improved-v1.9.0-improved.1-Windows-x64-CPU.zip**을 다운로드합니다.
+1. **VisionAce-Improved-v1.9.0-improved.2-Windows-x64-CPU.zip**을 다운로드합니다.
 2. ZIP 전체를 압축 해제합니다.
 3. **VisionAce-Improved.exe**를 실행합니다. 옆의 `_internal` 폴더도 필요합니다.
 
@@ -23,11 +23,13 @@
 - 취소 중 작업 스레드 수명 보호, 썸네일 결과가 다른 폴더에 섞이는 문제 개선.
 - `F`는 이번 목록에서 숨기기로 변경하여 원본 이미지 삭제 방지.
 - 회전 로그, SHA256, 빌드 출처, 패키지 버전 및 검증 보고서 동봉.
+- 한글 글꼴 내장 및 한글·ASCII 표시 검사. 글꼴 누락을 발견한 `.1` 빌드는 게시 전에 중지했습니다.
 
 ## 지원 범위와 검증
 
 - 사용자의 PC에서는 테스트, 앱 실행, 모델 추론, 패키지 설치 또는 exe 빌드를 하지 않았습니다.
 - 배포 작업은 GitHub의 Windows 러너에서 회귀 테스트와 소스 기동 검사, exe 기동·화면 렌더링·네이티브 라이브러리 검사를 통과한 뒤 파일을 게시합니다.
+- GitHub에서 실제 Ultralytics 라이브러리로 무작위 초기화한 YOLO/RT-DETR 체크포인트와 합성 이미지를 사용하는 연결 검사도 수행합니다. 학습 정확도 검사는 아닙니다.
 - 사용자의 실제 이미지·모델에 대한 정확도와 GPU 추론은 확인하지 않았습니다. exe 검증은 실제 학습 모델 추론 검증과 다릅니다.
 - 이 exe는 CPU 배포판입니다. CUDA/TensorFlow는 포함하지 않습니다. Keras 분할 모델은 별도의 소스 환경에서 지원하며 정해진 NHWC 입력·확률 출력 형식만 허용합니다.
 - **DINOv3 직접 추론은 이번 배포판에 포함하지 않습니다.** 백본 `.pth`만으로 탐지할 수 없으며 별도 탐지/분할 헤드, 설정과 어댑터가 필요합니다. 잘못된 YOLO 로딩을 시도하는 대신 안내합니다. Grounding DINO와도 다른 모델입니다.

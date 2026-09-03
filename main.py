@@ -15,7 +15,7 @@ import sys
 import tempfile
 import traceback
 
-APP_VERSION = "1.9.0-improved.1"
+APP_VERSION = "1.9.0-improved.2"
 APP_NAME = "VisionAce Improved"
 
 
@@ -71,6 +71,47 @@ def _write_report(path, report):
     target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def configure_application_font(app, font_path=None):
+    """Use the shipped Korean/Latin font without depending on Windows fonts."""
+    from PySide6.QtGui import QFont, QFontDatabase
+
+    resource_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    path = Path(font_path) if font_path is not None else resource_root / "assets" / "fonts" / "NotoSansKR.ttf"
+    font_id = QFontDatabase.addApplicationFont(str(path))
+    if font_id < 0:
+        raise RuntimeError(f"Cannot load the bundled application font: {path}")
+    families = QFontDatabase.applicationFontFamilies(font_id)
+    if not families:
+        raise RuntimeError(f"The bundled font contains no usable font family: {path}")
+    app.setFont(QFont(families[0], 10))
+    app.setProperty("visionaceFontFamily", families[0])
+    logging.info("Registered application font %s from %s", families[0], path)
+    return families[0]
+
+
+def _verify_application_font(app):
+    """Fail the release smoke check when text would render as missing-glyph boxes."""
+    from PySide6.QtGui import QFontInfo, QFontMetrics
+
+    font = app.font()
+    metrics = QFontMetrics(font)
+    ascii_points = range(0x20, 0x7F)
+    hangul_points = range(0xAC00, 0xD7A4)
+    missing = [point for points in (ascii_points, hangul_points)
+               for point in points if not metrics.inFontUcs4(point)]
+    if missing:
+        sample = ", ".join(f"U+{point:04X}" for point in missing[:12])
+        raise RuntimeError(f"Application font lacks {len(missing)} required ASCII/Hangul glyphs: {sample}")
+    return {
+        "registered_family": app.property("visionaceFontFamily"),
+        "requested_family": font.family(),
+        "resolved_family": QFontInfo(font).family(),
+        "ascii_glyphs_checked": len(ascii_points),
+        "hangul_syllables_checked": len(hangul_points),
+        "missing_glyphs": 0,
+    }
+
+
 def _smoke_test(app, window, report_path):
     """CI-only packaging check: no model weights, model inference or downloads."""
     import cv2
@@ -83,6 +124,7 @@ def _smoke_test(app, window, report_path):
     from ultralytics import RTDETR, YOLO
     from PySide6.QtCore import QTimer
 
+    font_report = _verify_application_font(app)
     # Exercise native binaries; importing alone misses torch/vision DLL mismatches.
     boxes = torch.tensor([[0., 0., 4., 4.], [0., 0., 4., 4.]])
     kept = torchvision.ops.nms(boxes, torch.tensor([0.9, 0.8]), 0.5)
@@ -114,7 +156,8 @@ def _smoke_test(app, window, report_path):
         "versions": {"PySide6": PySide6.__version__, "torch": torch.__version__,
                      "torchvision": torchvision.__version__, "ultralytics": ultralytics.__version__,
                      "opencv": cv2.__version__, "numpy": np.__version__, "Pillow": PIL.__version__},
-        "checks": ["main_window_render", "qt_event_loop", "torchvision_native_nms", "opencv_native_conversion", "yolo_rtdetr_imports"],
+        "checks": ["bundled_font_ascii_hangul_glyphs", "main_window_render", "qt_event_loop", "torchvision_native_nms", "opencv_native_conversion", "yolo_rtdetr_imports"],
+        "font": font_report,
         "weights_downloaded": False, "model_inference_tested": False,
         "cuda_runtime": torch.version.cuda, "screenshot": screenshot.name,
     }
@@ -149,6 +192,7 @@ def main(argv=None):
         app.setApplicationVersion(APP_VERSION)
         app.setOrganizationName("VisionAce-Improved")
         app.setStyle("Fusion")
+        configure_application_font(app)
         app.setStyleSheet(_DARK_STYLE)
         set_language(get_config().language)
 

@@ -14,3 +14,5 @@ The portable build copies available license/notice files to `third-party-license
 - [Pillow](https://github.com/python-pillow/Pillow)
 
 Keras/TensorFlow and DINOv3 are not bundled in the CPU portable release.
+
+Noto Sans KR is included for consistent Korean and Latin rendering. Its SIL Open Font License 1.1 is included at `assets/fonts/OFL.txt`; the unchanged font's source and checksum are recorded in `assets/fonts/SOURCE.md`.
