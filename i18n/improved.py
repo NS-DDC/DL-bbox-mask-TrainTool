@@ -1,6 +1,12 @@
 """Strings for the separately distributed Improved edition."""
 
 KO_IMPROVED = {
+    "help_workflow_step3": "3. 모드 선택: Detection(W) 또는 Segmentation(E)",
+    "help_workflow_result_images": "   • images/: 원본 복사 설정을 켰을 때만 생성",
+    "help_tip_save_extension": "기본 저장은 원본을 유지하고 라벨만 저장합니다. 픽셀 마스크는 PNG이며, 원본 복사는 설정에서 켤 수 있습니다.",
+    "help_tip_label_format": "YOLO 라벨은 클래스ID와 원본 크기 기준 정규화 좌표를 저장합니다. 클래스 목록은 labels/.visionace-project.json에 저장합니다.",
+    "help_tool_select": "선택 모드 (Q): 라벨을 선택하고 핸들로 크기와 위치를 수정합니다.",
+    "help_tool_bbox": "Detection 모드 (W): Rectangle은 드래그로, Polygon은 점을 찍고 Enter/우클릭으로 완료합니다.",
     "improved_add_class_first": "라벨을 그리기 전에 클래스 목록에서 클래스를 추가하고 선택해 주세요.",
     "improved_view": "보기",
     "improved_actual_size": "원본 픽셀 1:1 (Ctrl+1)",
@@ -39,6 +45,12 @@ KO_IMPROVED = {
 }
 
 EN_IMPROVED = {
+    "help_workflow_step3": "3. Select Detection (W) or Segmentation (E)",
+    "help_workflow_result_images": "   • images/: created only when original copying is enabled",
+    "help_tip_save_extension": "Default saves preserve originals and write annotations only. Pixel masks are PNG; enable original copying in Settings if needed.",
+    "help_tip_label_format": "YOLO labels store class IDs and coordinates normalized by the original image size. Class mapping lives in labels/.visionace-project.json.",
+    "help_tool_select": "Select mode (Q): select a label and adjust its position or size with handles.",
+    "help_tool_bbox": "Detection mode (W): drag rectangles, or click polygon vertices and finish with Enter/right click.",
     "improved_add_class_first": "Add and select a class before drawing annotations.",
     "improved_view": "View",
     "improved_actual_size": "Original pixels 1:1 (Ctrl+1)",

@@ -248,6 +248,26 @@ QToolBar {
     spacing: 4px;
     padding: 2px;
 }
+QToolButton {
+    color: #dddddd;
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    padding: 4px;
+}
+QToolButton:hover {
+    background-color: #484848;
+}
+QToolButton:checked {
+    color: white;
+    background-color: #356b9c;
+}
+QToolButton:disabled {
+    color: #888888;
+}
+QDockWidget {
+    color: #cccccc;
+}
 QStatusBar {
     background-color: #333333;
     color: #aaaaaa;
