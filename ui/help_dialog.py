@@ -22,12 +22,17 @@ class HelpDialog(QDialog):
         layout.setSpacing(0)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        # Set dialog background
+        self.setStyleSheet("QDialog { background-color: #1e1e1e; }")
+
         # Scroll area for content
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background-color: #1e1e1e; border: none; }")
 
         content = QWidget()
+        content.setStyleSheet("QWidget { background-color: #1e1e1e; }")
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(20, 16, 20, 16)
         content_layout.setSpacing(12)
@@ -114,30 +119,30 @@ class HelpDialog(QDialog):
         if " : " in text:
             key, desc = text.split(" : ", 1)
             html = (
-                f'<span style="color:#e6c07b; font-family:monospace; font-size:12px;">'
+                f'<span style="color:#ffd966; font-family:monospace; font-size:12px; font-weight:bold;">'
                 f'{key}</span>'
                 f'<span style="color:#888;"> &mdash; </span>'
-                f'<span style="color:#ccc;">{desc}</span>'
+                f'<span style="color:#ffffff;">{desc}</span>'
             )
         else:
-            html = f'<span style="color:#ccc;">{text}</span>'
+            html = f'<span style="color:#ffffff;">{text}</span>'
         label = QLabel(html)
         label.setTextFormat(Qt.TextFormat.RichText)
-        label.setStyleSheet("padding: 2px 8px;")
+        label.setStyleSheet("padding: 2px 8px; background-color: #1e1e1e;")
         return label
 
     @staticmethod
     def _desc_label(text: str) -> QLabel:
         label = QLabel(text)
         label.setWordWrap(True)
-        label.setStyleSheet("color: #cccccc; padding: 3px 8px; font-size: 12px;")
+        label.setStyleSheet("color: #ffffff; padding: 3px 8px; font-size: 12px; background-color: #1e1e1e;")
         return label
 
     @staticmethod
     def _tip_label(text: str) -> QLabel:
-        label = QLabel(f"  {text}")
+        label = QLabel(f"• {text}")
         label.setWordWrap(True)
-        label.setStyleSheet("color: #aaaaaa; padding: 2px 8px; font-size: 12px;")
+        label.setStyleSheet("color: #f0f0f0; padding: 2px 8px; font-size: 12px; background-color: #1e1e1e;")
         return label
 
     @staticmethod

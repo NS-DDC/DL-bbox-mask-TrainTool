@@ -1,6 +1,5 @@
 """Canvas widget for image display and label drawing using QGraphicsView."""
 
-import os
 from typing import Optional
 import numpy as np
 import cv2
@@ -17,6 +16,7 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Signal, Qt, QPointF, QRectF
 
 from core.label_manager import LabelItem
+from core.image_io import read_image
 from ui.toolbar_widget import ToolMode
 from i18n import tr
 
@@ -37,6 +37,9 @@ class CanvasWidget(QWidget):
     cursor_moved = Signal(int, int)  # x, y in image coords
     zoom_changed = Signal(float)
     skip_image_requested = Signal()  # X key pressed to skip
+    brush_size_changed_from_canvas = Signal(int)  # +/- key or Ctrl+wheel changed brush size
+    edit_mask_requested = Signal(int)  # request to edit mask at index
+    class_switch_requested = Signal(int)  # number key 1-0 → class index 0-9
 
     def __init__(self, parent: QWidget = None):
         super().__init__(parent)
@@ -63,6 +66,7 @@ class CanvasWidget(QWidget):
         self._edit_label_index = -1
         self._edit_handle_index = -1  # bbox: 0-3=corners, 4=center; polygon: vertex index
         self._edit_start_pos: Optional[QPointF] = None
+        self._edit_original_points: list[tuple[float, float]] = []  # pre-edit snapshot for undo
         self._handle_items: list[QGraphicsEllipseItem] = []
 
         # Brush/mask state
@@ -110,23 +114,48 @@ class CanvasWidget(QWidget):
 
     # --- Public API ---
 
-    def load_image(self, image_path: str):
-        if not os.path.isfile(image_path):
-            return
-        self._image_path = image_path
-        self._image_pixmap = QPixmap(image_path)
-        if self._image_pixmap.isNull():
-            return
+    def load_image(self, image_path: str) -> bool:
+        """Display full source pixels; fitting changes only the view transform.
+
+        Decoding is shared with inference to prevent EXIF rotation or a Qt TIFF
+        plugin from changing dimensions. A failed load preserves the old image.
+        """
+        pixels = read_image(image_path)
+        if pixels is None:
+            return False
+        h, w = pixels.shape[:2]
+        pixels = np.ascontiguousarray(pixels)
+        image = QImage(pixels.data, w, h, pixels.strides[0], QImage.Format.Format_BGR888)
+        pixmap = QPixmap.fromImage(image)
+        if pixmap.isNull():
+            return False
+        pixmap.setDevicePixelRatio(1.0)
 
         # Save current mode before clearing
         current_mode = self._mode
 
+        # Release references to live temporary items before Qt deletes them.
+        self._reset_drawing_state()
         self._scene.clear()
         self._label_items.clear()
-        self._reset_drawing_state()
+        self._image_path = image_path
+        self._image_pixmap = pixmap
+
+        # Reset editing state to prevent stale handle references on new image
+        self._editing = False
+        self._edit_label_index = -1
+        self._edit_handle_index = -1
+        self._edit_start_pos = None
+        self._edit_original_points = []
+        self._handle_items.clear()  # scene.clear() already removed the items
+        self._selected_index = -1
 
         # Reset mask and mask display for new image
         self._current_mask = None
+        self._current_mask_color = None
+        self._brush_snapshot = None
+        self._brushing = False
+        self._erasing = False
         self._mask_pixmap_item = None
         self._brush_cursor = None
 
@@ -142,7 +171,23 @@ class CanvasWidget(QWidget):
 
         self._placeholder.hide()
         self._view.show()
-        self._view.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+        self.fit_to_window()
+        return True
+
+    def fit_to_window(self) -> None:
+        """Fit the original image without resizing image or annotation buffers."""
+        if self._pixmap_item is not None:
+            self._view.resetTransform()
+            self._view.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+            self.zoom_changed.emit(self._view.transform().m11() * 100)
+
+    def actual_size(self) -> None:
+        """Show one image pixel per view coordinate (100% zoom)."""
+        if self._pixmap_item is not None:
+            center = self._view.mapToScene(self._view.viewport().rect().center())
+            self._view.resetTransform()
+            self._view.centerOn(center)
+            self.zoom_changed.emit(100.0)
 
     def get_image_size(self) -> tuple[int, int]:
         if self._image_pixmap and not self._image_pixmap.isNull():
@@ -194,7 +239,7 @@ class CanvasWidget(QWidget):
 
     def set_brush_size(self, size: int):
         """Update brush size."""
-        self._brush_size = size
+        self._brush_size = max(5, min(200, size))
         if self._brush_cursor:
             self._update_brush_cursor_size()
 
@@ -216,6 +261,35 @@ class CanvasWidget(QWidget):
         """Set BBox drawing mode (rectangle or polygon)."""
         self._bbox_mode = mode
 
+    def load_mask_for_editing(
+        self,
+        mask_data: np.ndarray,
+        color: str,
+        class_id: int | None = None,
+        class_name: str | None = None,
+    ):
+        """Load an existing mask into the canvas for editing.
+
+        When *class_id* / *class_name* are given the canvas class state is
+        updated immediately so that ``_finalize_mask`` will later use the
+        correct class, even if the current class on the canvas differs.
+        """
+        if self._image_pixmap is None:
+            return
+        w, h = self._image_pixmap.width(), self._image_pixmap.height()
+        # A geometry mismatch is an import error, never an implicit resize.
+        if mask_data.shape != (h, w):
+            raise ValueError(f"Mask dimensions {mask_data.shape} do not match source image {(h, w)}")
+        self._current_mask = mask_data.copy()
+        self._current_mask_color = color
+        # Sync class so finalize uses the mask's original class
+        if class_id is not None:
+            self._current_class_id = class_id
+        if class_name is not None:
+            self._current_class_name = class_name
+        self._update_mask_display()
+        self._show_brush_cursor()
+
     def finish_current_shape(self):
         """Finish drawing current polygon or mask."""
         if self._mode == ToolMode.SEGMENTATION:
@@ -227,10 +301,27 @@ class CanvasWidget(QWidget):
                 self._finalize_mask()
 
     def has_unfinished_mask(self) -> bool:
-        """Check if there's an unfinished mask drawing."""
-        return (self._mode == ToolMode.SEGMENTATION and
-                self._current_mask is not None and
+        """Check if there's an unfinished mask drawing (any mode)."""
+        return (self._current_mask is not None and
                 self._current_mask.max() > 0)
+
+    def finalize_pending_mask(self):
+        """Finalize any pending mask regardless of current mode.
+
+        Use this for cleanup before saving or switching images, so that
+        mask data loaded into the brush is not lost.
+        """
+        if self._current_mask is not None and self._current_mask.max() > 0:
+            self._finalize_mask()
+
+    def discard_pending_mask(self):
+        """Discard any pending mask without saving (for skip/next-without-save)."""
+        if self._current_mask is not None:
+            self._current_mask = np.zeros_like(self._current_mask)
+            self._current_mask_color = None
+            if self._mask_pixmap_item and self._mask_pixmap_item.scene():
+                self._scene.removeItem(self._mask_pixmap_item)
+                self._mask_pixmap_item = None
 
     def display_labels(self, labels: list[LabelItem]):
         # Remove old label graphics
@@ -246,6 +337,11 @@ class CanvasWidget(QWidget):
         for label in labels:
             gfx = self._create_label_graphics(label)
             self._label_items.append(LabelGraphicsItem(label, gfx))
+
+    def set_label_visible(self, index: int, visible: bool):
+        """Show or hide a label graphics item by index."""
+        if 0 <= index < len(self._label_items):
+            self._label_items[index].graphics_item.setVisible(visible)
 
     def highlight_label(self, index: int):
         # Reset previous highlight
@@ -327,12 +423,26 @@ class CanvasWidget(QWidget):
         self._handle_items.clear()
 
     def clear_canvas(self):
+        self._reset_drawing_state()
         self._scene.clear()
         self._label_items.clear()
         self._pixmap_item = None
         self._image_pixmap = None
         self._image_path = None
-        self._reset_drawing_state()
+        self._handle_items.clear()
+        self._selected_index = -1
+        self._editing = False
+        self._edit_label_index = -1
+        self._edit_handle_index = -1
+        self._edit_start_pos = None
+        self._edit_original_points = []
+        self._current_mask = None
+        self._current_mask_color = None
+        self._mask_pixmap_item = None
+        self._brush_cursor = None
+        self._brush_snapshot = None
+        self._brushing = False
+        self._erasing = False
         self._view.hide()
         self._placeholder.show()
 
@@ -357,14 +467,16 @@ class CanvasWidget(QWidget):
             # Render mask as pixmap overlay
             h, w = label.mask_data.shape
             overlay = np.zeros((h, w, 4), dtype=np.uint8)
-            overlay[:, :, 0] = color.blue()
+            overlay[:, :, 0] = color.red()
             overlay[:, :, 1] = color.green()
-            overlay[:, :, 2] = color.red()
+            overlay[:, :, 2] = color.blue()
             overlay[:, :, 3] = (label.mask_data * 0.5).astype(np.uint8)
 
             qimage = QImage(overlay.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
+            qimage = qimage.copy()  # detach from numpy buffer before it goes out of scope
             pixmap = QPixmap.fromImage(qimage)
             item = self._scene.addPixmap(pixmap)
+            item.setShapeMode(QGraphicsPixmapItem.ShapeMode.MaskShape)
             item.setZValue(10)
             return item
         else:
@@ -513,8 +625,8 @@ class CanvasWidget(QWidget):
         if self._current_mask is None:
             return
 
-        x, y = int(pos.x()), int(pos.y())
         h, w = self._current_mask.shape
+        x, y = min(int(pos.x()), w - 1), min(int(pos.y()), h - 1)
         if not (0 <= x < w and 0 <= y < h):
             return
 
@@ -544,13 +656,14 @@ class CanvasWidget(QWidget):
         mask_color = self._current_mask_color if self._current_mask_color else self._current_color
         color = QColor(mask_color)
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
-        overlay[:, :, 0] = color.blue()
+        overlay[:, :, 0] = color.red()
         overlay[:, :, 1] = color.green()
-        overlay[:, :, 2] = color.red()
+        overlay[:, :, 2] = color.blue()
         overlay[:, :, 3] = (self._current_mask * 0.5).astype(np.uint8)  # 50% opacity
 
-        # Convert to QPixmap
+        # Convert to QPixmap (copy QImage to detach from numpy buffer)
         qimage = QImage(overlay.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
+        qimage = qimage.copy()
         pixmap = QPixmap.fromImage(qimage)
 
         # Update or create pixmap item
@@ -608,13 +721,13 @@ class CanvasWidget(QWidget):
             x = max(0, min(scene_pos.x(), w))
             y = max(0, min(scene_pos.y(), h))
             return QPointF(x, y)
-        return scene_pos
+        return None
 
     # --- Mouse handlers ---
 
     def _on_mouse_press(self, pos, button=Qt.MouseButton.LeftButton):
         scene_pos = self._scene_pos(pos)
-        if not scene_pos or not self._image_pixmap:
+        if scene_pos is None or self._image_pixmap is None:
             return
 
         # Segmentation mode - brush or polygon
@@ -646,15 +759,10 @@ class CanvasWidget(QWidget):
             else:
                 # Brush mode
                 if button == Qt.MouseButton.RightButton:
-                    # Save snapshot for undo before erasing
-                    if self._current_mask is not None:
-                        self._brush_snapshot = self._current_mask.copy()
                     self._erasing = True
                     self._draw_on_mask(scene_pos, erase=True)
                 elif button == Qt.MouseButton.LeftButton:
-                    # Save snapshot for undo before drawing
                     if self._current_mask is not None:
-                        self._brush_snapshot = self._current_mask.copy()
                         # Save color when first drawing starts
                         if self._current_mask_color is None or self._current_mask.max() == 0:
                             self._current_mask_color = self._current_color
@@ -675,6 +783,9 @@ class CanvasWidget(QWidget):
                     self._edit_label_index = self._selected_index
                     self._edit_handle_index = i
                     self._edit_start_pos = scene_pos
+                    # Save pre-edit points so undo captures the original state
+                    label = self._label_items[self._selected_index].label
+                    self._edit_original_points = list(label.points)
                     return
 
         if self._mode == ToolMode.DETECTION:
@@ -722,7 +833,7 @@ class CanvasWidget(QWidget):
 
     def _on_mouse_move(self, pos):
         scene_pos = self._scene_pos(pos)
-        if not scene_pos:
+        if scene_pos is None:
             return
 
         # Emit cursor position in image coords
@@ -761,7 +872,7 @@ class CanvasWidget(QWidget):
 
     def _on_mouse_release(self, pos):
         scene_pos = self._scene_pos(pos)
-        if not scene_pos:
+        if scene_pos is None:
             return
 
         # Finish brushing/erasing - create undo command
@@ -772,19 +883,26 @@ class CanvasWidget(QWidget):
                 self._erasing = False
             # Create undo command for brush stroke
             if self._brush_snapshot is not None and self._current_mask is not None:
-                # Emit brush stroke completed signal (will be handled by main window)
-                # For now, just clear snapshot
                 self._brush_snapshot = None
             return
 
         # Finish editing
         if self._editing:
             label = self._label_items[self._edit_label_index].label
-            self.label_updated.emit(self._edit_label_index, label)
+            # Capture the modified points before restoring the original
+            new_points = list(label.points)
+            # Restore original pre-edit points on the shared object so that
+            # UpdateLabelCommand.redo() captures the true pre-edit state.
+            label.points = list(self._edit_original_points)
+            # Create a separate copy with the modified points
+            updated = label.copy()
+            updated.points = new_points
+            self.label_updated.emit(self._edit_label_index, updated)
             self._editing = False
             self._edit_label_index = -1
             self._edit_handle_index = -1
             self._edit_start_pos = None
+            self._edit_original_points = []
             return
 
         if self._mode == ToolMode.DETECTION and self._bbox_mode == "rectangle" and self._drawing and self._draw_start:
@@ -825,6 +943,18 @@ class CanvasWidget(QWidget):
         # Segmentation mode polygon (Ctrl+Click mode)
         if self._mode == ToolMode.SEGMENTATION and len(self._polygon_points) >= 3:
             self._finalize_polygon()
+            return
+
+        # SELECT mode: double-click on mask label to edit it
+        if self._mode == ToolMode.SELECT:
+            scene_pos = self._scene_pos(pos)
+            if scene_pos is not None:
+                items_at = self._scene.items(scene_pos)
+                for item in items_at:
+                    for i, li in enumerate(self._label_items):
+                        if li.graphics_item is item and li.label.label_type == "mask":
+                            self.edit_mask_requested.emit(i)
+                            return
 
     def _finalize_polygon(self):
         """Finalize and emit polygon label."""
@@ -853,11 +983,21 @@ class CanvasWidget(QWidget):
         self.label_created.emit(label)
 
     def _finalize_polygon_as_bbox(self):
-        """Finalize polygon as bbox label (for Detection mode with polygon option)."""
+        """Finalize polygon as bbox label (for Detection mode with polygon option).
+
+        The polygon vertices are converted to a proper 4-corner bounding box
+        so that display, editing handles, and YOLO serialisation all work
+        consistently with a standard bbox.
+        """
         if len(self._polygon_points) < 3:
             return
 
-        points = [(p.x(), p.y()) for p in self._polygon_points]
+        # Convert polygon to bounding rect (4 corners)
+        xs = [p.x() for p in self._polygon_points]
+        ys = [p.y() for p in self._polygon_points]
+        x1, y1 = min(xs), min(ys)
+        x2, y2 = max(xs), max(ys)
+        points = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
 
         # Cleanup temp graphics
         if self._temp_polygon and self._temp_polygon.scene():
@@ -872,42 +1012,36 @@ class CanvasWidget(QWidget):
         label = LabelItem(
             class_id=self._current_class_id,
             class_name=self._current_class_name,
-            label_type="bbox",  # Saved as bbox type
+            label_type="bbox",
             points=points,
             color=self._current_color,
         )
         self.label_created.emit(label)
 
     def _on_wheel_zoom(self, delta: int, modifiers=None):
-        """Handle wheel zoom or brush size change with Ctrl."""
+        """Handle wheel event.
+        - SEGMENTATION mode: Ctrl+Wheel = zoom, plain Wheel = brush size change
+        - Other modes: plain Wheel = zoom
+        """
         from PySide6.QtWidgets import QApplication
         if modifiers is None:
             modifiers = QApplication.keyboardModifiers()
 
-        # Ctrl + Wheel = Brush size change
-        if modifiers & Qt.KeyboardModifier.ControlModifier:
-            if self._mode == ToolMode.SEGMENTATION:
-                change = 5 if delta > 0 else -5
-                new_size = max(5, min(100, self._brush_size + change))
-                self.set_brush_size(new_size)
-                # Emit signal to update toolbar
-                from ui.main_window import MainWindow
-                # Find parent main window and update slider
-                parent = self.parent()
-                while parent and not isinstance(parent, QWidget):
-                    parent = parent.parent()
-                if parent:
-                    # Update slider value through main window
-                    pass  # Will be handled by signal connection
-            return
+        ctrl_held = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
 
-        # Normal zoom
-        factor = 1.15 if delta > 0 else 1 / 1.15
-        self._view.scale(factor, factor)
-        # Calculate zoom level
-        transform = self._view.transform()
-        zoom = transform.m11() * 100
-        self.zoom_changed.emit(zoom)
+        if self._mode == ToolMode.SEGMENTATION and not ctrl_held:
+            # Plain wheel in segmentation mode -> adjust brush size
+            step = 5 if delta > 0 else -5
+            new_size = max(5, min(200, self._brush_size + step))
+            self.set_brush_size(new_size)
+            self.brush_size_changed_from_canvas.emit(new_size)
+        else:
+            # Ctrl+Wheel (or any wheel outside segmentation mode) -> zoom
+            factor = 1.15 if delta > 0 else 1 / 1.15
+            self._view.scale(factor, factor)
+            transform = self._view.transform()
+            zoom = transform.m11() * 100
+            self.zoom_changed.emit(zoom)
 
     def _on_key_press(self, event: QKeyEvent):
         """Handle keyboard shortcuts."""
@@ -934,6 +1068,43 @@ class CanvasWidget(QWidget):
         elif event.key() == Qt.Key.Key_X:
             # Skip to next image without saving
             self.skip_image_requested.emit()
+        elif event.key() == Qt.Key.Key_Plus or event.key() == Qt.Key.Key_Equal:
+            # Check for Ctrl modifier -> zoom in
+            from PySide6.QtWidgets import QApplication
+            modifiers = QApplication.keyboardModifiers()
+            if modifiers & Qt.KeyboardModifier.ControlModifier:
+                # Ctrl+ = zoom in
+                self._view.scale(1.15, 1.15)
+                transform = self._view.transform()
+                self.zoom_changed.emit(transform.m11() * 100)
+            else:
+                # + = increase brush size
+                if self._mode == ToolMode.SEGMENTATION:
+                    new_size = min(200, self._brush_size + 5)
+                    self.set_brush_size(new_size)
+                    self.brush_size_changed_from_canvas.emit(new_size)
+        elif event.key() == Qt.Key.Key_Minus:
+            # Check for Ctrl modifier -> zoom out
+            from PySide6.QtWidgets import QApplication
+            modifiers = QApplication.keyboardModifiers()
+            if modifiers & Qt.KeyboardModifier.ControlModifier:
+                # Ctrl- = zoom out
+                self._view.scale(1 / 1.15, 1 / 1.15)
+                transform = self._view.transform()
+                self.zoom_changed.emit(transform.m11() * 100)
+            else:
+                # - = decrease brush size
+                if self._mode == ToolMode.SEGMENTATION:
+                    new_size = max(5, self._brush_size - 5)
+                    self.set_brush_size(new_size)
+                    self.brush_size_changed_from_canvas.emit(new_size)
+        else:
+            # Number keys 1-9,0 → quick class switch (0-9)
+            key = event.key()
+            if Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
+                self.class_switch_requested.emit(key - Qt.Key.Key_1)
+            elif key == Qt.Key.Key_0:
+                self.class_switch_requested.emit(9)
 
     def retranslate(self):
         self._placeholder.setText(tr("canvas_no_image"))

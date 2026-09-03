@@ -1,0 +1,147 @@
+name: Windows portable CPU release
+
+on:
+  push:
+    branches: ["improvements/**"]
+    tags: ["v1.9.0*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-build:
+    runs-on: windows-2022
+    timeout-minutes: 70
+    env:
+      PYTHONUTF8: "1"
+      QT_QPA_PLATFORM: offscreen
+      YOLO_AUTOINSTALL: "false"
+      YOLO_OFFLINE: "true"
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install complete CPU runtime and build dependencies
+        shell: pwsh
+        run: |
+          "VISIONACE_HOME=$env:RUNNER_TEMP\visionace-ci" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "YOLO_CONFIG_DIR=$env:RUNNER_TEMP\visionace-ci\ultralytics" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MPLCONFIGDIR=$env:RUNNER_TEMP\visionace-ci\matplotlib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          python -m pip install --upgrade pip
+          if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed" }
+          python -m pip install -r requirements-cpu.txt
+          if ($LASTEXITCODE -ne 0) { throw "CPU runtime installation failed" }
+          python -m pip install -r requirements.txt -r requirements-build.txt
+          if ($LASTEXITCODE -ne 0) { throw "Application dependencies failed" }
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw "Dependency consistency check failed" }
+      - name: Unit tests on GitHub runner
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports | Out-Null
+          python -m pytest -q --junitxml=reports/unit-tests.xml
+          if ($LASTEXITCODE -ne 0) { throw "Unit tests failed" }
+      - name: Source startup and native runtime smoke (no weights)
+        shell: pwsh
+        run: |
+          python main.py --smoke-test --report reports/source-smoke.json
+          if ($LASTEXITCODE -ne 0) { throw "Source startup smoke failed" }
+      - name: Build portable Windows executable
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean visionace.spec
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
+      - name: Frozen executable smoke with source and Python paths absent
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "frozen smoke 검증"
+          New-Item -ItemType Directory -Force $smokeRoot | Out-Null
+          Copy-Item -LiteralPath "dist/VisionAce-Improved" -Destination $smokeRoot -Recurse
+          $exe = Join-Path $smokeRoot "VisionAce-Improved/VisionAce-Improved.exe"
+          $report = Join-Path $env:GITHUB_WORKSPACE "reports/frozen-smoke.json"
+          $savedPath = $env:PATH
+          $savedPythonPath = $env:PYTHONPATH
+          $savedPythonHome = $env:PYTHONHOME
+          try {
+            $env:PATH = "$env:SystemRoot\system32;$env:SystemRoot"
+            $env:PYTHONPATH = ""
+            $env:PYTHONHOME = ""
+            $process = Start-Process -FilePath $exe -ArgumentList "--smoke-test --report `"$report`"" -WorkingDirectory $smokeRoot -PassThru -WindowStyle Hidden
+            if (-not $process.WaitForExit(180000)) {
+              Stop-Process -Id $process.Id -Force
+              throw "Frozen executable startup timed out"
+            }
+            $process.Refresh()
+            if ($process.ExitCode -ne 0) { throw "Frozen executable failed with exit $($process.ExitCode)" }
+            $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+            if ($result.status -ne "passed" -or -not $result.frozen) { throw "Frozen smoke report is invalid" }
+          } finally {
+            $env:PATH = $savedPath
+            $env:PYTHONPATH = $savedPythonPath
+            $env:PYTHONHOME = $savedPythonHome
+          }
+      - name: Package ZIP, checksums, provenance and licenses
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          BUILD_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
+        run: |
+          python scripts/package_release.py --tag "$env:BUILD_TAG"
+          if ($LASTEXITCODE -ne 0) { throw "Release packaging failed" }
+      - name: Save reports and build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-verification-${{ github.run_number }}
+          path: |
+            reports/
+            build/VisionAce-Improved/warn-*.txt
+            build/visionace/warn-*.txt
+            ${{ runner.temp }}/visionace-ci/logs/
+          if-no-files-found: warn
+      - name: Save release payload
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable-release
+          path: release/*
+          compression-level: 0
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v1.9.0')
+    needs: verify-build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-portable-release
+          path: release
+      - name: Publish verified portable assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release/* --verify-tag --title "VisionAce Improved $RELEASE_TAG (Windows CPU)" --notes-file docs/RELEASE_NOTES.md
+          fi

@@ -38,6 +38,7 @@ Thumbs.db
 
 # PyInstaller
 *.spec
+!visionace.spec
 build/
 dist/
 

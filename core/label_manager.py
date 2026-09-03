@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QUndoStack, QUndoCommand
 
 
-@dataclass
+@dataclass(eq=False)
 class LabelItem:
     """Represents a single annotation label on an image.
 
@@ -161,18 +161,37 @@ class ClearLabelsCommand(QUndoCommand):
 
     def redo(self) -> None:
         labels = self._manager._labels.get(self._image_path, [])
-        self._old_labels = list(labels)
+        # Deep copy each label so undo restores correct data even if
+        # the original objects are later mutated (e.g. mask_data in-place).
+        self._old_labels = [l.copy() for l in labels]
         labels.clear()
         self._manager.labels_changed.emit(self._image_path)
 
     def undo(self) -> None:
-        self._manager._labels[self._image_path] = list(self._old_labels)
+        self._manager._labels[self._image_path] = [l.copy() for l in self._old_labels]
         self._manager.labels_changed.emit(self._image_path)
 
 
 # ---------------------------------------------------------------------------
 # LabelManager
 # ---------------------------------------------------------------------------
+
+class ReplaceLabelsCommand(QUndoCommand):
+    """Apply one inference result as a single reversible edit."""
+
+    def __init__(self, manager, image_path, labels):
+        super().__init__("Apply auto labels")
+        self._manager = manager
+        self._path = image_path
+        self._old = [label.copy() for label in manager.get_labels(image_path)]
+        self._new = [label.copy() for label in labels]
+
+    def redo(self):
+        self._manager.set_labels(self._path, [label.copy() for label in self._new])
+
+    def undo(self):
+        self._manager.set_labels(self._path, [label.copy() for label in self._old])
+
 
 class LabelManager(QObject):
     """Manages per-image annotation labels with full undo/redo support.
@@ -200,6 +219,21 @@ class LabelManager(QObject):
     def get_labels(self, image_path: str) -> list[LabelItem]:
         """Return a *copy* of the label list for the given image."""
         return list(self._labels.get(image_path, []))
+
+    def is_image_loaded(self, image_path: str) -> bool:
+        """An explicitly empty annotation is distinct from an unread image."""
+        return image_path in self._labels
+
+    @property
+    def loaded_image_paths(self) -> list[str]:
+        return list(self._labels)
+
+    def clear(self) -> None:
+        self._undo_stack.clear()
+        self._labels.clear()
+
+    def replace_labels(self, image_path: str, labels: list[LabelItem]) -> None:
+        self._undo_stack.push(ReplaceLabelsCommand(self, image_path, labels))
 
     def get_labels_ref(self, image_path: str) -> list[LabelItem]:
         """Return a direct reference to the internal label list (use with care)."""

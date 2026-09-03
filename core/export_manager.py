@@ -11,6 +11,7 @@ import numpy as np
 
 from core.label_manager import LabelItem, LabelManager
 from core.project_manager import ProjectManager
+from core.image_io import atomic_write_image, atomic_write_text, read_image
 
 logger = logging.getLogger(__name__)
 
@@ -29,36 +30,35 @@ class ExportManager:
         image_width: int,
         image_height: int,
         output_path: str,
+        class_names: dict[int, str] | None = None,
     ) -> None:
-        """Save labels in YOLO annotation format.
+        """Save labels in standard YOLO annotation format.
 
-        For **bbox** labels the line format is::
+        Line format (bbox)::
 
             <class_id> <cx> <cy> <w> <h>
 
-        where all values are normalized to [0, 1].
-
-        For **polygon** and **mask** labels the line format is::
+        Line format (polygon/mask)::
 
             <class_id> <x1> <y1> <x2> <y2> ... <xn> <yn>
-
-        where all coordinates are normalized. Masks are converted to polygons.
 
         Args:
             labels: List of ``LabelItem`` instances.
             image_width: Width of the source image in pixels.
             image_height: Height of the source image in pixels.
             output_path: Destination ``.txt`` file path.
+            class_names: Optional mapping of class id to class name.
         """
         if image_width <= 0 or image_height <= 0:
-            logger.error("Invalid image dimensions: %dx%d", image_width, image_height)
-            return
+            raise ValueError(f"Invalid source image dimensions: {image_width}x{image_height}")
 
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
 
         lines: list[str] = []
         for label in labels:
+            if label.class_id < 0:
+                raise ValueError("Class IDs must be nonnegative")
             if label.label_type == "bbox":
                 line = ExportManager._bbox_to_yolo_line(
                     label, image_width, image_height
@@ -73,23 +73,23 @@ class ExportManager:
                     label, image_width, image_height
                 )
             else:
-                logger.warning("Unknown label type: %s", label.label_type)
-                continue
+                raise ValueError(f"Unknown label type: {label.label_type}")
             if line:
                 lines.append(line)
 
-        with open(out, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines))
-            if lines:
-                fh.write("\n")
+        atomic_write_text(out, "\n".join(lines) + ("\n" if lines else ""))
 
     @staticmethod
     def _bbox_to_yolo_line(
         label: LabelItem, img_w: int, img_h: int
     ) -> str:
-        """Convert a bbox LabelItem to a YOLO detection line."""
-        xs = [p[0] for p in label.points]
-        ys = [p[1] for p in label.points]
+        """Convert a bbox LabelItem to a standard YOLO detection line.
+
+        Standard YOLO format: ``<class_id> <cx> <cy> <w> <h>``
+        """
+        points = _validated_points(label, img_w, img_h, minimum=2)
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
         x_min, x_max = min(xs), max(xs)
         y_min, y_max = min(ys), max(ys)
 
@@ -97,6 +97,8 @@ class ExportManager:
         cy = ((y_min + y_max) / 2.0) / img_h
         w = (x_max - x_min) / img_w
         h = (y_max - y_min) / img_h
+        if w <= 0 or h <= 0:
+            raise ValueError("A bounding box must have positive width and height")
 
         return f"{label.class_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}"
 
@@ -104,9 +106,12 @@ class ExportManager:
     def _polygon_to_yolo_line(
         label: LabelItem, img_w: int, img_h: int
     ) -> str:
-        """Convert a polygon LabelItem to a YOLO segmentation line."""
+        """Convert a polygon LabelItem to a standard YOLO segmentation line.
+
+        Standard YOLO format: ``<class_id> <x1> <y1> <x2> <y2> ... <xn> <yn>``
+        """
         coords: list[str] = []
-        for x, y in label.points:
+        for x, y in _validated_points(label, img_w, img_h, minimum=3):
             coords.append(f"{x / img_w:.6f}")
             coords.append(f"{y / img_h:.6f}")
         return f"{label.class_id} " + " ".join(coords)
@@ -116,35 +121,28 @@ class ExportManager:
         label: LabelItem, img_w: int, img_h: int
     ) -> str:
         """Convert a mask LabelItem to YOLO segmentation line by finding contours."""
-        if label.mask_data is None:
-            return ""
+        mask = _validated_mask(label, img_w, img_h)
 
         # Find contours in the mask
         contours, _ = cv2.findContours(
-            label.mask_data, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
         if not contours:
             return ""
 
-        # Use the largest contour
-        largest_contour = max(contours, key=cv2.contourArea)
-
-        # Simplify contour to reduce point count
-        epsilon = 0.005 * cv2.arcLength(largest_contour, True)
-        approx = cv2.approxPolyDP(largest_contour, epsilon, True)
-
-        # Convert to normalized coordinates
-        coords: list[str] = []
-        for point in approx:
-            x, y = point[0]
-            coords.append(f"{x / img_w:.6f}")
-            coords.append(f"{y / img_h:.6f}")
-
-        if len(coords) < 6:  # At least 3 points
-            return ""
-
-        return f"{label.class_id} " + " ".join(coords)
+        # Keep all disconnected regions, not just the largest one. Raster GT
+        # remains the lossless representation for holes and tiny components.
+        lines = []
+        for contour in contours:
+            epsilon = 0.005 * cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+            if len(approx) < 3:
+                continue
+            coords = [f"{value:.6f}" for point in approx
+                      for value in (point[0][0] / img_w, point[0][1] / img_h)]
+            lines.append(f"{label.class_id} " + " ".join(coords))
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # YOLO TXT – load
@@ -159,6 +157,9 @@ class ExportManager:
     ) -> list[LabelItem]:
         """Load labels from a YOLO-format ``.txt`` annotation file.
 
+        Supports both old format (class_id first) and new format
+        (class_name class_id first) for backward compatibility.
+
         Args:
             txt_path: Path to the annotation file.
             image_width: Image width in pixels (for de-normalizing).
@@ -171,19 +172,40 @@ class ExportManager:
         path = Path(txt_path)
         if not path.is_file():
             return []
+        if image_width <= 0 or image_height <= 0:
+            raise ValueError("Source image dimensions must be positive")
 
         labels: list[LabelItem] = []
-        with open(path, "r", encoding="utf-8") as fh:
-            for raw_line in fh:
+        with open(path, "r", encoding="utf-8-sig") as fh:
+            for line_number, raw_line in enumerate(fh, 1):
                 line = raw_line.strip()
                 if not line:
                     continue
                 parts = line.split()
                 if len(parts) < 5:
-                    continue
+                    raise ValueError(f"Invalid annotation at {path}:{line_number}")
 
-                class_id = int(parts[0])
-                values = [float(v) for v in parts[1:]]
+                # Detect format: new format has class_name as first token (non-numeric)
+                try:
+                    numeric_id = parts[0].lstrip("+-").isdigit()
+                    if numeric_id:
+                        class_id = int(parts[0])
+                        cls_name = class_names.get(class_id, f"class_{class_id}")
+                        values = [float(v) for v in parts[1:]]
+                    else:
+                        cls_name = parts[0]
+                        class_id = int(parts[1])
+                        values = [float(v) for v in parts[2:]]
+                    if class_id < 0 or class_id >= 65535 or not all(np.isfinite(values)):
+                        raise ValueError("Invalid class ID or non-finite coordinates")
+                    if any(v < 0 or v > 1 for v in values):
+                        raise ValueError("Normalized coordinates must be in [0, 1]")
+                    if len(values) != 4 and (len(values) < 6 or len(values) % 2):
+                        raise ValueError("Polygons need at least three complete points")
+                    if len(values) == 4 and (values[2] <= 0 or values[3] <= 0):
+                        raise ValueError("Bounding boxes need positive dimensions")
+                except (ValueError, IndexError) as exc:
+                    raise ValueError(f"Invalid annotation at {path}:{line_number}: {exc}") from exc
 
                 if len(values) == 4:
                     # bbox: cx cy w h (normalized)
@@ -208,7 +230,6 @@ class ExportManager:
                         points.append((px, py))
                     label_type = "polygon"
 
-                cls_name = class_names.get(class_id, str(class_id))
                 labels.append(
                     LabelItem(
                         class_id=class_id,
@@ -218,6 +239,90 @@ class ExportManager:
                         color=_color_for_class(class_id),
                     )
                 )
+
+        return labels
+
+    # ------------------------------------------------------------------
+    # GT mask loading
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def load_gt_masks(
+        gt_image_dir: str,
+        image_path: str,
+        image_width: int,
+        image_height: int,
+        class_names: dict[int, str],
+    ) -> list[LabelItem]:
+        """Load GT masks from gt_image/<class_name>/ directory structure.
+
+        Args:
+            gt_image_dir: Path to the gt_image/ directory.
+            image_path: Path to the source image (used for matching filename).
+            image_width: Image width in pixels.
+            image_height: Image height in pixels.
+            class_names: Mapping of class id to class name.
+
+        Returns:
+            List of ``LabelItem`` instances with mask_data loaded.
+        """
+        gt_dir = Path(gt_image_dir)
+        if not gt_dir.exists():
+            return []
+
+        img_stem = Path(image_path).stem
+        labels: list[LabelItem] = []
+
+        # Reverse map: class_name -> class_id
+        name_to_id = {name: cid for cid, name in class_names.items()}
+
+        for class_dir in sorted(gt_dir.iterdir()):
+            if not class_dir.is_dir():
+                continue
+
+            class_name = class_dir.name
+            class_id = name_to_id.get(class_name, -1)
+
+            # Try to find matching mask file (any extension)
+            # Prefer lossless PNG over legacy JPEG masks if both are present.
+            for mask_file in sorted(class_dir.iterdir(), key=lambda p: (p.suffix.lower() != ".png", p.name)):
+                if (mask_file.is_file() and mask_file.stem.casefold() == img_stem.casefold()
+                        and mask_file.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}):
+                    # Load mask
+                    mask = read_image(mask_file, cv2.IMREAD_UNCHANGED)
+                    if mask is None:
+                        raise ValueError(f"Could not read GT mask: {mask_file}")
+                    if mask.ndim == 3:
+                        conversion = cv2.COLOR_BGRA2GRAY if mask.shape[2] == 4 else cv2.COLOR_BGR2GRAY
+                        mask = cv2.cvtColor(mask, conversion)
+
+                    if mask.shape != (image_height, image_width):
+                        raise ValueError(
+                            f"GT mask {mask_file} has dimensions {mask.shape}; "
+                            f"source image requires {(image_height, image_width)}. "
+                            "Resizing must be an explicit import operation."
+                        )
+
+                    # Lossless external masks commonly encode foreground as 1,
+                    # including uint16 TIFF. Only JPEG needs noise rejection.
+                    foreground = mask >= 128 if mask_file.suffix.lower() in {".jpg", ".jpeg"} else mask > 0
+                    mask = foreground.astype(np.uint8) * 255
+
+                    if mask.max() == 0:
+                        # An explicit empty PNG clears any older JPEG/TIFF GT.
+                        break
+
+                    labels.append(
+                        LabelItem(
+                            class_id=class_id if class_id >= 0 else 0,
+                            class_name=class_name,
+                            label_type="mask",
+                            points=[],
+                            color=_color_for_class(class_id if class_id >= 0 else 0),
+                            mask_data=mask,
+                        )
+                    )
+                    break  # Only one mask per class per image
 
         return labels
 
@@ -232,21 +337,19 @@ class ExportManager:
         image_height: int,
         output_path: str,
     ) -> None:
-        """Render all labels as a single-channel binary mask and save as PNG.
-
-        All foreground regions (both bboxes and polygons) are drawn as white
-        (255) on a black (0) background.
-
-        Args:
-            labels: Labels to render.
-            image_width: Width of the output mask.
-            image_height: Height of the output mask.
-            output_path: Destination PNG file path.
-        """
+        """Render all labels as a single-channel binary mask and save as PNG."""
+        if image_width <= 0 or image_height <= 0:
+            raise ValueError("Source image dimensions must be positive")
         mask = np.zeros((image_height, image_width), dtype=np.uint8)
 
         for label in labels:
-            pts = np.array(label.points, dtype=np.int32)
+            if label.label_type == "mask":
+                mask_binary = _validated_mask(label, image_width, image_height)
+                mask[mask_binary > 0] = 255
+                continue
+
+            pts = np.array(_validated_points(label, image_width, image_height,
+                           minimum=2 if label.label_type == "bbox" else 3), dtype=np.int32)
 
             if label.label_type == "bbox":
                 xs = pts[:, 0]
@@ -260,7 +363,7 @@ class ExportManager:
 
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(out), mask)
+        atomic_write_image(out, mask)
 
     @staticmethod
     def save_semantic_mask(
@@ -270,41 +373,40 @@ class ExportManager:
         output_path: str,
         multi_label: bool = True,
     ) -> None:
-        """Save segmentation mask as PNG with semantic class encoding.
-
-        Args:
-            labels: Labels to render.
-            image_width: Width of the output mask.
-            image_height: Height of the output mask.
-            output_path: Destination PNG file path.
-            multi_label: If True, pixel value = class_id + 1 (0 reserved for background).
-                        If False, binary mask (0=background, 255=foreground).
-        """
-        mask = np.zeros((image_height, image_width), dtype=np.uint8)
+        """Save segmentation mask as PNG with semantic class encoding."""
+        if image_width <= 0 or image_height <= 0:
+            raise ValueError("Source image dimensions must be positive")
+        max_id = max((label.class_id for label in labels), default=0)
+        if any(label.class_id < 0 for label in labels) or (multi_label and max_id >= 65535):
+            raise ValueError("Semantic class IDs must be between 0 and 65534")
+        dtype = np.uint16 if multi_label and max_id >= 255 else np.uint8
+        mask = np.zeros((image_height, image_width), dtype=dtype)
 
         for label in labels:
             # Set pixel value based on mode
             pixel_value = (label.class_id + 1) if multi_label else 255
 
             if label.label_type == "bbox":
-                pts = np.array(label.points, dtype=np.int32)
+                pts = np.array(_validated_points(label, image_width, image_height, minimum=2), dtype=np.int32)
                 xs = pts[:, 0]
                 ys = pts[:, 1]
                 x1, x2 = int(xs.min()), int(xs.max())
                 y1, y2 = int(ys.min()), int(ys.max())
                 cv2.rectangle(mask, (x1, y1), (x2, y2), pixel_value, thickness=-1)
             elif label.label_type == "polygon":
-                pts = np.array(label.points, dtype=np.int32)
+                pts = np.array(_validated_points(label, image_width, image_height, minimum=3), dtype=np.int32)
                 if len(pts) >= 3:
                     cv2.fillPoly(mask, [pts], pixel_value)
-            elif label.label_type == "mask" and label.mask_data is not None:
+            elif label.label_type == "mask":
                 # Directly use the mask data
-                mask_binary = (label.mask_data > 0).astype(np.uint8)
+                mask_binary = _validated_mask(label, image_width, image_height)
                 mask[mask_binary > 0] = pixel_value
+            else:
+                raise ValueError(f"Unknown label type: {label.label_type}")
 
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(out), mask)
+        atomic_write_image(out, mask)
 
     # ------------------------------------------------------------------
     # Batch save
@@ -315,17 +417,7 @@ class ExportManager:
         label_manager: LabelManager,
         project_manager: ProjectManager,
     ) -> int:
-        """Save labels for every image that has annotations.
-
-        Labels are written in YOLO format to the project's label directory.
-
-        Args:
-            label_manager: Source of annotation data.
-            project_manager: Provides image list and label paths.
-
-        Returns:
-            Number of label files written.
-        """
+        """Save labels for every image that has annotations."""
         count = 0
         for image_path in project_manager.image_list:
             labels = label_manager.get_labels(image_path)
@@ -333,7 +425,7 @@ class ExportManager:
                 continue
 
             # Read image dimensions.
-            img = cv2.imread(image_path)
+            img = read_image(image_path)
             if img is None:
                 logger.warning("Could not read image: %s", image_path)
                 continue
@@ -350,6 +442,20 @@ class ExportManager:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _validated_mask(label: LabelItem, width: int, height: int) -> np.ndarray:
+    if label.mask_data is None or label.mask_data.shape != (height, width):
+        actual = None if label.mask_data is None else label.mask_data.shape
+        raise ValueError(f"Mask dimensions {actual} do not match source image {(height, width)}")
+    return (label.mask_data > 0).astype(np.uint8) * 255
+
+
+def _validated_points(label: LabelItem, width: int, height: int, minimum: int) -> np.ndarray:
+    points = np.asarray(label.points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 2 or len(points) < minimum or not np.isfinite(points).all():
+        raise ValueError(f"Invalid {label.label_type} points for class {label.class_id}")
+    return np.clip(points, (0, 0), (width, height))
+
 
 _DEFAULT_COLORS: list[str] = [
     "#FF3838", "#FF9D97", "#FF701F", "#FFB21D", "#CFD231",
