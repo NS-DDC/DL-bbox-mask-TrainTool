@@ -70,6 +70,16 @@ jobs:
           $smokeRoot = Join-Path $env:RUNNER_TEMP "frozen smoke 검증"
           New-Item -ItemType Directory -Force $smokeRoot | Out-Null
           Copy-Item -LiteralPath "dist/VisionAce-Improved" -Destination $smokeRoot -Recurse
+          $sourceFont = Join-Path $env:GITHUB_WORKSPACE "assets/fonts/NotoSansKR.ttf"
+          $bundledFont = Join-Path $smokeRoot "VisionAce-Improved/_internal/assets/fonts/NotoSansKR.ttf"
+          if (-not (Test-Path -LiteralPath $bundledFont -PathType Leaf)) {
+            throw "Bundled font is absent or misplaced: $bundledFont"
+          }
+          $sourceHash = (Get-FileHash -LiteralPath $sourceFont -Algorithm SHA256).Hash
+          $bundledHash = (Get-FileHash -LiteralPath $bundledFont -Algorithm SHA256).Hash
+          $fontEvidence = [ordered]@{ source_sha256 = $sourceHash; bundled_sha256 = $bundledHash; bundled_path = $bundledFont; bytes = (Get-Item -LiteralPath $bundledFont).Length }
+          $fontEvidence | ConvertTo-Json | Set-Content -LiteralPath "reports/font-package.json" -Encoding utf8
+          if ($sourceHash -ne $bundledHash) { throw "Bundled font checksum does not match source font" }
           $exe = Join-Path $smokeRoot "VisionAce-Improved/VisionAce-Improved.exe"
           $report = Join-Path $env:GITHUB_WORKSPACE "reports/frozen-smoke.json"
           $savedPath = $env:PATH

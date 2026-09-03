@@ -16,7 +16,10 @@ vision_data, vision_bins, vision_imports = collect_all("torchvision", include_py
 datas = ultra_data + vision_data + copy_metadata("ultralytics", recursive=True)
 datas += copy_metadata("PySide6") + copy_metadata("Pillow")
 datas += collect_data_files("torch", include_py_files=True)
-datas += [(os.path.join(SPECPATH, "assets", "fonts"), "assets/fonts")]
+datas += [
+    (os.path.join(SPECPATH, "assets", "fonts", name), "assets/fonts")
+    for name in ("NotoSansKR.ttf", "OFL.txt", "SOURCE.md")
+]
 binaries = ultra_bins + vision_bins + collect_dynamic_libs("torch")
 
 a = Analysis(

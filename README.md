@@ -1,10 +1,10 @@
 # VisionAce Improved
 
-**원본 이미지 라벨링과 자동 라벨링을 개선한 별도 Windows 배포판**입니다. 기준은 [VisionAce v1.8.1](https://github.com/NS-DDC/claude_code/releases/tag/v1.8.1)이며, 이 저장소의 `improvements/visionace-v1.9` 브랜치와 `v1.9.0-improved.2` 릴리스로 구분합니다. [원본 출처](docs/UPSTREAM.md) · [변경 이력](CHANGELOG.md)
+**원본 이미지 라벨링과 자동 라벨링을 개선한 별도 Windows 배포판**입니다. 기준은 [VisionAce v1.8.1](https://github.com/NS-DDC/claude_code/releases/tag/v1.8.1)이며, 이 저장소의 `improvements/visionace-v1.9` 브랜치와 `v1.9.0-improved.3` 릴리스로 구분합니다. [원본 출처](docs/UPSTREAM.md) · [변경 이력](CHANGELOG.md)
 
 ## Windows에서 바로 실행
 
-1. [개선판 릴리스](https://github.com/NS-DDC/DL-bbox-mask-TrainTool/releases/tag/v1.9.0-improved.2)에서 `VisionAce-Improved-v1.9.0-improved.2-Windows-x64-CPU.zip`을 받습니다.
+1. [개선판 릴리스](https://github.com/NS-DDC/DL-bbox-mask-TrainTool/releases/tag/v1.9.0-improved.3)에서 `VisionAce-Improved-v1.9.0-improved.3-Windows-x64-CPU.zip`을 받습니다.
 2. ZIP **전체를 압축 해제**하고 `VisionAce-Improved.exe`를 실행합니다.
 3. `_internal` 폴더는 exe 옆에 그대로 둡니다. Python 설치는 필요 없습니다.
 

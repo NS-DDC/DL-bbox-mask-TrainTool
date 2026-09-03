@@ -4,6 +4,7 @@ Entry point for the application.
 """
 
 import argparse
+import hashlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -15,7 +16,7 @@ import sys
 import tempfile
 import traceback
 
-APP_VERSION = "1.9.0-improved.2"
+APP_VERSION = "1.9.0-improved.3"
 APP_NAME = "VisionAce Improved"
 
 
@@ -73,18 +74,32 @@ def _write_report(path, report):
 
 def configure_application_font(app, font_path=None):
     """Use the shipped Korean/Latin font without depending on Windows fonts."""
+    from PySide6.QtCore import QByteArray
     from PySide6.QtGui import QFont, QFontDatabase
 
     resource_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     path = Path(font_path) if font_path is not None else resource_root / "assets" / "fonts" / "NotoSansKR.ttf"
-    font_id = QFontDatabase.addApplicationFont(str(path))
+    # Python opens Unicode Windows paths natively. Hand Qt the bytes so its
+    # platform font loader never has to re-open an encoded filesystem path.
+    try:
+        font_bytes = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"Cannot load the bundled application font: {path}: {exc}") from exc
+    digest = hashlib.sha256(font_bytes).hexdigest()
+    logging.info("Read bundled font bytes=%d sha256=%s path=%s", len(font_bytes), digest, path)
+    font_id = QFontDatabase.addApplicationFontFromData(QByteArray(font_bytes))
     if font_id < 0:
-        raise RuntimeError(f"Cannot load the bundled application font: {path}")
+        raise RuntimeError(
+            f"Cannot load the bundled application font from data: {path} "
+            f"(bytes={len(font_bytes)}, sha256={digest}, platform={app.platformName()})"
+        )
     families = QFontDatabase.applicationFontFamilies(font_id)
     if not families:
         raise RuntimeError(f"The bundled font contains no usable font family: {path}")
     app.setFont(QFont(families[0], 10))
     app.setProperty("visionaceFontFamily", families[0])
+    app.setProperty("visionaceFontSha256", digest)
+    app.setProperty("visionaceFontBytes", len(font_bytes))
     logging.info("Registered application font %s from %s", families[0], path)
     return families[0]
 
@@ -106,6 +121,9 @@ def _verify_application_font(app):
         "registered_family": app.property("visionaceFontFamily"),
         "requested_family": font.family(),
         "resolved_family": QFontInfo(font).family(),
+        "loader": "addApplicationFontFromData",
+        "font_sha256": app.property("visionaceFontSha256"),
+        "font_bytes": app.property("visionaceFontBytes"),
         "ascii_glyphs_checked": len(ascii_points),
         "hangul_syllables_checked": len(hangul_points),
         "missing_glyphs": 0,

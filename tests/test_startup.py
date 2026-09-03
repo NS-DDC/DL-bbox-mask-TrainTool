@@ -10,7 +10,7 @@ def test_import_does_not_start_qt_or_load_models():
     # main keeps the expensive and GUI imports inside main(), not module scope.
     module = importlib.import_module("main")
     assert callable(module.main)
-    assert module.APP_VERSION == "1.9.0-improved.2"
+    assert module.APP_VERSION == "1.9.0-improved.3"
 
 
 def test_version_does_not_need_gui(monkeypatch, capsys):
@@ -89,3 +89,41 @@ def test_missing_glyph_fails_the_smoke_gate(monkeypatch):
     monkeypatch.setattr(QtGui, "QFontMetrics", MissingHangulMetrics)
     with pytest.raises(RuntimeError, match="U\\+AC00"):
         main._verify_application_font(app)
+
+
+def test_font_loads_from_unicode_frozen_resource_root(tmp_path, monkeypatch):
+    import hashlib
+    from pathlib import Path
+    import main
+    from PySide6 import QtGui
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    source = Path(main.__file__).resolve().parent / "assets" / "fonts" / "NotoSansKR.ttf"
+    frozen_root = tmp_path / "압축 해제 검증" / "_internal"
+    bundled = frozen_root / "assets" / "fonts" / "NotoSansKR.ttf"
+    bundled.parent.mkdir(parents=True)
+    font_bytes = source.read_bytes()
+    bundled.write_bytes(font_bytes)
+    monkeypatch.setattr(main.sys, "_MEIPASS", str(frozen_root), raising=False)
+    monkeypatch.setattr(QtGui.QFontDatabase, "addApplicationFont",
+                        lambda path: pytest.fail("Qt must receive font bytes, not a filename"))
+    previous_font = app.font()
+    try:
+        main.configure_application_font(app)
+        report = main._verify_application_font(app)
+        assert report["font_sha256"] == hashlib.sha256(font_bytes).hexdigest()
+        assert report["font_bytes"] == len(font_bytes)
+        assert report["missing_glyphs"] == 0
+    finally:
+        app.setFont(previous_font)
+
+
+def test_invalid_font_data_still_fails_startup(tmp_path):
+    import main
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    invalid = tmp_path / "invalid.ttf"
+    invalid.write_bytes(b"not a valid TrueType font")
+    with pytest.raises(RuntimeError, match="Cannot load the bundled application font from data"):
+        main.configure_application_font(app, invalid)

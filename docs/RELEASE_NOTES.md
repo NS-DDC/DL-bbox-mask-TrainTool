@@ -1,10 +1,10 @@
-# VisionAce Improved 1.9.0-improved.2
+# VisionAce Improved 1.9.0-improved.3
 
 `claude_code`의 **VisionAce v1.8.1**을 기준으로 만든 별도 개선판입니다. 개선 소스와 실행 파일은 `NS-DDC/DL-bbox-mask-TrainTool`에 배포합니다.
 
 ## 실행
 
-1. **VisionAce-Improved-v1.9.0-improved.2-Windows-x64-CPU.zip**을 다운로드합니다.
+1. **VisionAce-Improved-v1.9.0-improved.3-Windows-x64-CPU.zip**을 다운로드합니다.
 2. ZIP 전체를 압축 해제합니다.
 3. **VisionAce-Improved.exe**를 실행합니다. 옆의 `_internal` 폴더도 필요합니다.
 
@@ -23,7 +23,7 @@
 - 취소 중 작업 스레드 수명 보호, 썸네일 결과가 다른 폴더에 섞이는 문제 개선.
 - `F`는 이번 목록에서 숨기기로 변경하여 원본 이미지 삭제 방지.
 - 회전 로그, SHA256, 빌드 출처, 패키지 버전 및 검증 보고서 동봉.
-- 한글 글꼴 내장 및 한글·ASCII 표시 검사. 글꼴 누락을 발견한 `.1` 빌드는 게시 전에 중지했습니다.
+- 한글 글꼴 내장 및 한글·ASCII 표시 검사. `.1`은 게시 전 중지, `.2`는 한글 실행 경로의 글꼴 로딩 검사에서 차단됐으며 `.3`에서 로딩 방식을 수정했습니다.
 
 ## 지원 범위와 검증
 
