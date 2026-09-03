@@ -1,5 +1,9 @@
-PySide6>=6.5.0
-ultralytics>=8.0.0
-opencv-python-headless>=4.8.0
-numpy>=1.24.0
-Pillow>=10.0.0
+# Python 3.11 x64. CPU releases install requirements-cpu.txt first.
+# Keep exactly one OpenCV wheel: ultralytics depends on opencv-python.
+PySide6==6.8.3
+ultralytics==8.4.129
+opencv-python==4.11.0.86
+numpy==1.26.4
+Pillow==11.3.0
+torch==2.6.0
+torchvision==0.21.0

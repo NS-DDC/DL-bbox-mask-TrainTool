@@ -2,6 +2,10 @@
 
 from i18n.en import EN
 from i18n.ko import KO
+from i18n.improved import EN_IMPROVED, KO_IMPROVED
+
+EN.update(EN_IMPROVED)
+KO.update(KO_IMPROVED)
 
 _LANGUAGES = {
     "en": EN,

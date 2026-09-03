@@ -3,33 +3,241 @@
 Entry point for the application.
 """
 
+import argparse
+import hashlib
+import json
+import logging
+from logging.handlers import RotatingFileHandler
+import multiprocessing
+import os
+from pathlib import Path
+import platform
 import sys
+import tempfile
+import traceback
 
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
-
-from config import get_config
-from i18n import set_language
-from ui.main_window import MainWindow
+APP_VERSION = "1.9.0-improved.3"
+APP_NAME = "VisionAce Improved"
 
 
-def main():
-    app = QApplication(sys.argv)
-    app.setApplicationName("VisionAce")
-    app.setOrganizationName("VisionAce")
+class _LogStream:
+    """Give console-less library code a usable stream and preserve diagnostics."""
 
-    # Apply dark style
-    app.setStyle("Fusion")
-    app.setStyleSheet(_DARK_STYLE)
+    encoding = "utf-8"
 
-    # Load language setting
-    config = get_config()
-    set_language(config.language)
+    def __init__(self, level):
+        self.level = level
 
-    window = MainWindow()
-    window.show()
+    def write(self, text):
+        if text and text.strip():
+            logging.getLogger("console").log(self.level, text.rstrip())
+        return len(text)
 
-    sys.exit(app.exec())
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+
+def configure_logging():
+    """Use a writable per-user location, even when extracted under Program Files."""
+    requested = Path(os.environ.get("VISIONACE_HOME", str(Path.home() / ".visionace-improved")))
+    last_error = None
+    for base in (requested, Path(tempfile.gettempdir()) / "visionace-improved"):
+        try:
+            log_dir = base / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "visionace.log"
+            handler = RotatingFileHandler(log_path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+            break
+        except OSError as exc:
+            last_error = exc
+    else:
+        raise OSError("Cannot create the application log in the user or temporary directory") from last_error
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().setLevel(logging.INFO)
+    logging.getLogger().addHandler(handler)
+    logging.captureWarnings(True)
+    if sys.stdout is None or getattr(sys, "_visionace_redirect_stdio", False):
+        sys.stdout = _LogStream(logging.INFO)
+    if sys.stderr is None or getattr(sys, "_visionace_redirect_stdio", False):
+        sys.stderr = _LogStream(logging.ERROR)
+    return log_path
+
+
+def _write_report(path, report):
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def configure_application_font(app, font_path=None):
+    """Use the shipped Korean/Latin font without depending on Windows fonts."""
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtGui import QFont, QFontDatabase
+
+    resource_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    path = Path(font_path) if font_path is not None else resource_root / "assets" / "fonts" / "NotoSansKR.ttf"
+    # Python opens Unicode Windows paths natively. Hand Qt the bytes so its
+    # platform font loader never has to re-open an encoded filesystem path.
+    try:
+        font_bytes = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"Cannot load the bundled application font: {path}: {exc}") from exc
+    digest = hashlib.sha256(font_bytes).hexdigest()
+    logging.info("Read bundled font bytes=%d sha256=%s path=%s", len(font_bytes), digest, path)
+    font_id = QFontDatabase.addApplicationFontFromData(QByteArray(font_bytes))
+    if font_id < 0:
+        raise RuntimeError(
+            f"Cannot load the bundled application font from data: {path} "
+            f"(bytes={len(font_bytes)}, sha256={digest}, platform={app.platformName()})"
+        )
+    families = QFontDatabase.applicationFontFamilies(font_id)
+    if not families:
+        raise RuntimeError(f"The bundled font contains no usable font family: {path}")
+    app.setFont(QFont(families[0], 10))
+    app.setProperty("visionaceFontFamily", families[0])
+    app.setProperty("visionaceFontSha256", digest)
+    app.setProperty("visionaceFontBytes", len(font_bytes))
+    logging.info("Registered application font %s from %s", families[0], path)
+    return families[0]
+
+
+def _verify_application_font(app):
+    """Fail the release smoke check when text would render as missing-glyph boxes."""
+    from PySide6.QtGui import QFontInfo, QFontMetrics
+
+    font = app.font()
+    metrics = QFontMetrics(font)
+    ascii_points = range(0x20, 0x7F)
+    hangul_points = range(0xAC00, 0xD7A4)
+    missing = [point for points in (ascii_points, hangul_points)
+               for point in points if not metrics.inFontUcs4(point)]
+    if missing:
+        sample = ", ".join(f"U+{point:04X}" for point in missing[:12])
+        raise RuntimeError(f"Application font lacks {len(missing)} required ASCII/Hangul glyphs: {sample}")
+    return {
+        "registered_family": app.property("visionaceFontFamily"),
+        "requested_family": font.family(),
+        "resolved_family": QFontInfo(font).family(),
+        "loader": "addApplicationFontFromData",
+        "font_sha256": app.property("visionaceFontSha256"),
+        "font_bytes": app.property("visionaceFontBytes"),
+        "ascii_glyphs_checked": len(ascii_points),
+        "hangul_syllables_checked": len(hangul_points),
+        "missing_glyphs": 0,
+    }
+
+
+def _smoke_test(app, window, report_path):
+    """CI-only packaging check: no model weights, model inference or downloads."""
+    import cv2
+    import numpy as np
+    import PIL
+    import PySide6
+    import torch
+    import torchvision
+    import ultralytics
+    from ultralytics import RTDETR, YOLO
+    from PySide6.QtCore import QTimer
+
+    font_report = _verify_application_font(app)
+    # Exercise native binaries; importing alone misses torch/vision DLL mismatches.
+    boxes = torch.tensor([[0., 0., 4., 4.], [0., 0., 4., 4.]])
+    kept = torchvision.ops.nms(boxes, torch.tensor([0.9, 0.8]), 0.5)
+    if kept.tolist() != [0]:
+        raise RuntimeError("torchvision native NMS check failed")
+    image = np.zeros((8, 12, 3), dtype=np.uint8)
+    if cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).shape != (8, 12):
+        raise RuntimeError("OpenCV native conversion check failed")
+    if not callable(YOLO) or not callable(RTDETR):
+        raise RuntimeError("Ultralytics model entrypoints unavailable")
+    app.processEvents()
+    if app.property("visionaceStartupError"):
+        raise RuntimeError(app.property("visionaceStartupError"))
+    target = Path(report_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    screenshot = target.with_suffix(".png")
+    if not window.grab().save(str(screenshot)):
+        raise RuntimeError("Qt could not render the main window")
+    QTimer.singleShot(100, app.quit)
+    exit_code = app.exec()
+    if app.property("visionaceStartupError"):
+        raise RuntimeError(app.property("visionaceStartupError"))
+    if exit_code:
+        raise RuntimeError(f"Qt event loop exited with {exit_code}")
+    report = {
+        "status": "passed", "version": APP_VERSION,
+        "frozen": bool(getattr(sys, "frozen", False)),
+        "platform": platform.platform(), "python": platform.python_version(),
+        "versions": {"PySide6": PySide6.__version__, "torch": torch.__version__,
+                     "torchvision": torchvision.__version__, "ultralytics": ultralytics.__version__,
+                     "opencv": cv2.__version__, "numpy": np.__version__, "Pillow": PIL.__version__},
+        "checks": ["bundled_font_ascii_hangul_glyphs", "main_window_render", "qt_event_loop", "torchvision_native_nms", "opencv_native_conversion", "yolo_rtdetr_imports"],
+        "font": font_report,
+        "weights_downloaded": False, "model_inference_tested": False,
+        "cuda_runtime": torch.version.cuda, "screenshot": screenshot.name,
+    }
+    _write_report(target, report)
+    logging.info("Packaging smoke check passed: %s", target)
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=APP_NAME)
+    parser.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
+    parser.add_argument("--smoke-test", action="store_true", help="CI startup and runtime packaging check; no model weights")
+    parser.add_argument("--report", default="smoke-test.json", help="JSON report path for --smoke-test")
+    args = parser.parse_args(argv)
+    if args.smoke_test:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ["YOLO_OFFLINE"] = "true"
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ.setdefault("YOLO_AUTOINSTALL", "false")
+    log_path = configure_logging()
+    logging.info("Starting %s %s frozen=%s", APP_NAME, APP_VERSION, getattr(sys, "frozen", False))
+    app = None
+    try:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        from config import get_config
+        from i18n import set_language
+        from ui.main_window import MainWindow
+
+        app = QApplication([sys.argv[0]])
+        app.setApplicationName(APP_NAME)
+        app.setApplicationVersion(APP_VERSION)
+        app.setOrganizationName("VisionAce-Improved")
+        app.setStyle("Fusion")
+        configure_application_font(app)
+        app.setStyleSheet(_DARK_STYLE)
+        set_language(get_config().language)
+
+        def handle_exception(exc_type, exc_value, exc_tb):
+            logging.critical("Unhandled application exception", exc_info=(exc_type, exc_value, exc_tb))
+            if args.smoke_test:
+                app.setProperty("visionaceStartupError", str(exc_value))
+                _write_report(args.report, {"status": "failed", "error": str(exc_value), "log": str(log_path)})
+                app.exit(1)
+            else:
+                QMessageBox.critical(None, APP_NAME, f"{exc_value}\n\nDiagnostic log:\n{log_path}")
+
+        sys.excepthook = handle_exception
+        window = MainWindow()
+        window.setWindowTitle(f"{window.windowTitle()} — Improved {APP_VERSION}")
+        window.show()
+        if args.smoke_test:
+            return _smoke_test(app, window, args.report)
+        return app.exec()
+    except Exception as exc:
+        logging.exception("Application startup failed")
+        if args.smoke_test:
+            _write_report(args.report, {"status": "failed", "error": str(exc), "traceback": traceback.format_exc(), "log": str(log_path)})
+        elif app is not None:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(None, APP_NAME, f"Startup failed: {exc}\n\nDiagnostic log:\n{log_path}")
+        return 1
 
 
 _DARK_STYLE = """
@@ -57,6 +265,26 @@ QToolBar {
     border: none;
     spacing: 4px;
     padding: 2px;
+}
+QToolButton {
+    color: #dddddd;
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    padding: 4px;
+}
+QToolButton:hover {
+    background-color: #484848;
+}
+QToolButton:checked {
+    color: white;
+    background-color: #356b9c;
+}
+QToolButton:disabled {
+    color: #888888;
+}
+QDockWidget {
+    color: #cccccc;
 }
 QStatusBar {
     background-color: #333333;
@@ -144,4 +372,5 @@ QGraphicsView {
 
 
 if __name__ == "__main__":
-    main()
+    multiprocessing.freeze_support()
+    raise SystemExit(main())

@@ -1,37 +1,20 @@
 @echo off
+setlocal
 chcp 65001 >nul
-echo ============================================
-echo   VisionAce - EXE Build Script
-echo ============================================
-echo.
-
-REM Check if PyInstaller is installed
-pip show pyinstaller >nul 2>&1
-if errorlevel 1 (
-    echo [INFO] PyInstaller not found. Installing...
-    pip install pyinstaller
-    echo.
-)
-
-echo [1/3] Cleaning previous build...
-if exist build rmdir /s /q build
-if exist dist rmdir /s /q dist
-echo       Done.
-echo.
-
-echo [2/3] Building EXE with PyInstaller...
-pyinstaller visionace.spec
-if errorlevel 1 (
-    echo.
-    echo [ERROR] Build failed! Check the output above.
-    pause
+cd /d "%~dp0"
+echo VisionAce Improved - Windows x64 CPU portable build
+echo Use Python 3.11 x64 in a dedicated virtual environment.
+echo Install requirements-cpu.txt, requirements.txt and requirements-build.txt first.
+echo This command does not install packages or delete existing output directories.
+if exist "dist\VisionAce-Improved" (
+    echo Output already exists. Preserve or rename dist\VisionAce-Improved before building again.
     exit /b 1
 )
-echo.
-
-echo [3/3] Build complete!
-echo.
-echo   Output: dist\VisionAce\VisionAce.exe
-echo.
-echo ============================================
-pause
+set YOLO_AUTOINSTALL=false
+set YOLO_OFFLINE=true
+set MPLBACKEND=Agg
+python -m PyInstaller --clean visionace.spec
+if errorlevel 1 exit /b 1
+echo Build complete: dist\VisionAce-Improved\VisionAce-Improved.exe
+echo Distribute the entire VisionAce-Improved folder. The EXE alone is not portable.
+endlocal
