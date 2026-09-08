@@ -1,10 +1,10 @@
-# VisionAce Improved 1.9.0-improved.3
+# VisionAce Improved 1.9.0-improved.4
 
 `claude_code`의 **VisionAce v1.8.1**을 기준으로 만든 별도 개선판입니다. 개선 소스와 실행 파일은 `NS-DDC/DL-bbox-mask-TrainTool`에 배포합니다.
 
 ## 실행
 
-1. **VisionAce-Improved-v1.9.0-improved.3-Windows-x64-CPU.zip**을 다운로드합니다.
+1. **VisionAce-Improved-v1.9.0-improved.4-Windows-x64-CPU.zip**을 다운로드합니다.
 2. ZIP 전체를 압축 해제합니다.
 3. **VisionAce-Improved.exe**를 실행합니다. 옆의 `_internal` 폴더도 필요합니다.
 
@@ -12,6 +12,9 @@
 
 ## 개선 내용
 
+- 이미지 목록에서 마우스로 이미지를 선택해 보기만 하면 빈 라벨 TXT를 생성하거나 기존 라벨을 다시 쓰지 않음. 실제 추가·수정·삭제가 있는 이미지만 저장.
+- 확대 화면에서 선택 모드(`Q`) 우클릭 드래그 이동 지원. 그리기 모드에서도 쓸 수 있는 `Space+좌클릭 드래그`와 기존 휠 클릭 드래그 유지.
+- 그리기 모드의 우클릭 지우기·폴리곤 완료 동작을 유지하여 화면 이동과 충돌하지 않음.
 - 원본 해상도 좌표로 라벨링, `Ctrl+1` 원본 배율, `Ctrl+0` 화면 맞춤.
 - 기본 저장은 라벨만 저장. 선택한 경우 원본 파일을 바이트 그대로 복사하며 다른 원본을 덮어쓰지 않음.
 - 한글 경로, `.tif`/`.tiff`, EXIF 방향에 대한 화면·모델 좌표 일치.

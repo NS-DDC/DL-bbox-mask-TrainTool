@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 from typing import Optional
 import numpy as np
 
@@ -185,12 +186,24 @@ class ReplaceLabelsCommand(QUndoCommand):
         self._path = image_path
         self._old = [label.copy() for label in manager.get_labels(image_path)]
         self._new = [label.copy() for label in labels]
+        self._old_forced_dirty = image_path in manager._forced_dirty
 
     def redo(self):
-        self._manager.set_labels(self._path, [label.copy() for label in self._new])
+        self._manager.set_labels(
+            self._path, [label.copy() for label in self._new], mark_clean=False
+        )
+        # An explicit auto-label result is review state even when it contains
+        # zero detections and therefore matches a previously empty image.
+        self._manager._forced_dirty.add(self._path)
 
     def undo(self):
-        self._manager.set_labels(self._path, [label.copy() for label in self._old])
+        self._manager.set_labels(
+            self._path, [label.copy() for label in self._old], mark_clean=False
+        )
+        if self._old_forced_dirty:
+            self._manager._forced_dirty.add(self._path)
+        else:
+            self._manager._forced_dirty.discard(self._path)
 
 
 class LabelManager(QObject):
@@ -205,6 +218,11 @@ class LabelManager(QObject):
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._labels: dict[str, list[LabelItem]] = {}
+        # A loaded image is not necessarily edited.  Keep a compact signature
+        # of the last disk/save state so browsing images cannot create empty
+        # TXT files, while deleting the final real label still counts as edit.
+        self._clean_signatures: dict[str, tuple] = {}
+        self._forced_dirty: set[str] = set()
         self._undo_stack = QUndoStack(self)
 
     # -- Public properties ---------------------------------------------------
@@ -224,6 +242,24 @@ class LabelManager(QObject):
         """An explicitly empty annotation is distinct from an unread image."""
         return image_path in self._labels
 
+    def is_dirty(self, image_path: str) -> bool:
+        """Return whether annotations differ from their loaded/saved state."""
+        if image_path not in self._labels:
+            return False
+        clean = self._clean_signatures.get(image_path, self._annotation_signature([]))
+        return (
+            image_path in self._forced_dirty
+            or self._annotation_signature(self._labels[image_path]) != clean
+        )
+
+    def mark_clean(self, image_path: str) -> None:
+        """Record the current annotations as successfully persisted."""
+        if image_path in self._labels:
+            self._clean_signatures[image_path] = self._annotation_signature(
+                self._labels[image_path]
+            )
+            self._forced_dirty.discard(image_path)
+
     @property
     def loaded_image_paths(self) -> list[str]:
         return list(self._labels)
@@ -231,6 +267,8 @@ class LabelManager(QObject):
     def clear(self) -> None:
         self._undo_stack.clear()
         self._labels.clear()
+        self._clean_signatures.clear()
+        self._forced_dirty.clear()
 
     def replace_labels(self, image_path: str, labels: list[LabelItem]) -> None:
         self._undo_stack.push(ReplaceLabelsCommand(self, image_path, labels))
@@ -269,14 +307,70 @@ class LabelManager(QObject):
 
     # -- Bulk operations (non-undoable, for loading from disk) ---------------
 
-    def set_labels(self, image_path: str, labels: list[LabelItem]) -> None:
+    def set_labels(
+        self, image_path: str, labels: list[LabelItem], *, mark_clean: bool = True
+    ) -> None:
         """Directly replace all labels for an image without undo tracking.
 
-        Use this when loading labels from files, not for user edits.
+        Disk loads use the default ``mark_clean=True``.  Internal transfers,
+        such as temporarily moving a mask into the brush canvas, preserve the
+        prior snapshot with ``mark_clean=False``.
         """
         self._labels[image_path] = list(labels)
+        if mark_clean:
+            self.mark_clean(image_path)
         self.labels_changed.emit(image_path)
 
     def remove_image(self, image_path: str) -> None:
         """Remove all label data for an image path entirely."""
         self._labels.pop(image_path, None)
+        self._clean_signatures.pop(image_path, None)
+        self._forced_dirty.discard(image_path)
+
+    @staticmethod
+    def _annotation_signature(labels: list[LabelItem]) -> tuple:
+        """Build an order-independent signature matching persisted meaning.
+
+        Per-class raster masks are unioned by ``SaveManager``.  Mirroring that
+        here keeps an untouched mask clean when it is temporarily loaded into
+        the brush and later restored as one combined mask.
+        """
+        vectors = []
+        mask_groups: dict[tuple[int, str], list[np.ndarray | None]] = {}
+        for label in labels:
+            if label.label_type == "mask":
+                mask_groups.setdefault((label.class_id, label.class_name), []).append(
+                    label.mask_data
+                )
+                continue
+            vectors.append((
+                label.class_id,
+                label.class_name,
+                label.label_type,
+                tuple((float(x), float(y)) for x, y in label.points),
+            ))
+
+        masks = []
+        for key, arrays in mask_groups.items():
+            if any(array is None for array in arrays):
+                masks.append((*key, "invalid-none"))
+                continue
+            shapes = {array.shape for array in arrays if array is not None}
+            if len(shapes) != 1:
+                parts = sorted(
+                    (array.shape, hashlib.sha256(
+                        np.ascontiguousarray(array > 0).tobytes()
+                    ).digest())
+                    for array in arrays if array is not None
+                )
+                masks.append((*key, "shape-mismatch", tuple(parts)))
+                continue
+            combined = np.zeros(next(iter(shapes)), dtype=np.bool_)
+            for array in arrays:
+                combined |= np.asarray(array) > 0
+            masks.append((
+                *key,
+                combined.shape,
+                hashlib.sha256(np.ascontiguousarray(combined).tobytes()).digest(),
+            ))
+        return tuple(sorted(vectors)), tuple(sorted(masks))

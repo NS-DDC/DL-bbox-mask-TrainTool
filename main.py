@@ -16,7 +16,7 @@ import sys
 import tempfile
 import traceback
 
-APP_VERSION = "1.9.0-improved.3"
+APP_VERSION = "1.9.0-improved.4"
 APP_NAME = "VisionAce Improved"
 
 

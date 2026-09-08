@@ -201,6 +201,9 @@ class CanvasWidget(QWidget):
     def set_mode(self, mode: str):
         self._mode = mode
         self._reset_drawing_state()
+        # Right-drag is free for navigation in selection mode.  Drawing modes
+        # keep their established right-click erase/polygon-complete behavior.
+        self._view.set_right_drag_pan_enabled(mode == ToolMode.SELECT)
         if mode == ToolMode.SELECT:
             self._view.setDragMode(QGraphicsView.DragMode.NoDrag)
             self._view.setCursor(Qt.CursorShape.ArrowCursor)
@@ -1126,13 +1129,46 @@ class _GraphicsView(QGraphicsView):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._panning = False
         self._pan_start = None
+        self._pan_button = Qt.MouseButton.NoButton
+        self._right_drag_pan_enabled = True
+        self._space_pan = False
+        self._space_cursor_before: Optional[QCursor] = None
+        self._cursor_before_pan: Optional[QCursor] = None
+
+    def set_right_drag_pan_enabled(self, enabled: bool) -> None:
+        self._right_drag_pan_enabled = enabled
+
+    def _begin_pan(self, event: QMouseEvent) -> None:
+        self._panning = True
+        self._pan_start = event.position().toPoint()
+        self._pan_button = event.button()
+        self._cursor_before_pan = QCursor(self.cursor())
+        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        event.accept()
+
+    def _end_pan(self) -> None:
+        self._panning = False
+        self._pan_start = None
+        self._pan_button = Qt.MouseButton.NoButton
+        if self._space_pan:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        elif self._space_cursor_before is not None:
+            self.setCursor(self._space_cursor_before)
+            self._space_cursor_before = None
+        elif self._cursor_before_pan is not None:
+            self.setCursor(self._cursor_before_pan)
+        else:
+            self.unsetCursor()
+        self._cursor_before_pan = None
 
     def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.MouseButton.MiddleButton:
-            self._panning = True
-            self._pan_start = event.position().toPoint()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            event.accept()
+        use_pan = (
+            event.button() == Qt.MouseButton.MiddleButton
+            or (event.button() == Qt.MouseButton.RightButton and self._right_drag_pan_enabled)
+            or (event.button() == Qt.MouseButton.LeftButton and self._space_pan)
+        )
+        if use_pan:
+            self._begin_pan(event)
             return
         self.mouse_pressed.emit(event.position().toPoint(), event.button())
         super().mousePressEvent(event)
@@ -1153,10 +1189,8 @@ class _GraphicsView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
-        if event.button() == Qt.MouseButton.MiddleButton:
-            self._panning = False
-            self._pan_start = None
-            self.unsetCursor()
+        if self._panning and event.button() == self._pan_button:
+            self._end_pan()
             event.accept()
             return
         self.mouse_released.emit(event.position().toPoint())
@@ -1174,5 +1208,33 @@ class _GraphicsView(QGraphicsView):
         event.accept()
 
     def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key.Key_Space:
+            if not event.isAutoRepeat() and not self._space_pan:
+                self._space_pan = True
+                self._space_cursor_before = QCursor(self.cursor())
+                if not self._panning:
+                    self.setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
         self.key_pressed.emit(event)
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key.Key_Space:
+            if not event.isAutoRepeat():
+                self._space_pan = False
+                if not self._panning and self._space_cursor_before is not None:
+                    self.setCursor(self._space_cursor_before)
+                    self._space_cursor_before = None
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event):
+        self._space_pan = False
+        if self._panning:
+            self._end_pan()
+        elif self._space_cursor_before is not None:
+            self.setCursor(self._space_cursor_before)
+            self._space_cursor_before = None
+        super().focusOutEvent(event)

@@ -760,7 +760,9 @@ class MainWindow(QMainWindow):
         selected_set = set(id(m) for m in selected_masks)
         ref_labels = self._labels.get_labels_ref(img_path)
         remaining = [l for l in ref_labels if id(l) not in selected_set]
-        self._labels.set_labels(img_path, remaining)
+        # This is an in-memory transfer into the brush, not a user edit.  Keep
+        # the disk baseline so an unchanged mask is clean when finalized again.
+        self._labels.set_labels(img_path, remaining, mark_clean=False)
 
     @Slot(int)
     def _on_brush_size_changed(self, size: int):
@@ -951,6 +953,8 @@ class MainWindow(QMainWindow):
         try:
             if self._canvas.has_unfinished_mask():
                 self._canvas.finalize_pending_mask()
+            if not self._labels.is_dirty(self._current_image_path):
+                return True
             classes = self._label_list.get_classes()
             save_classes(self._project.label_dir, classes)
             self._saver.save_image_labels(self._current_image_path,

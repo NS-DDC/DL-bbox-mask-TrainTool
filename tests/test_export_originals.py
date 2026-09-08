@@ -8,7 +8,7 @@ import pytest
 
 from core.export_manager import ExportManager
 from core.image_io import atomic_write_image, read_image
-from core.label_manager import LabelItem
+from core.label_manager import LabelItem, LabelManager
 from core.project_manager import ProjectManager
 from core.save_manager import SaveManager
 
@@ -16,12 +16,19 @@ from core.save_manager import SaveManager
 class Labels:
     def __init__(self):
         self.items = {}
+        self.dirty = set()
 
     def get_labels(self, path):
         return self.items.get(path, [])
 
     def is_image_loaded(self, path):
         return path in self.items
+
+    def is_dirty(self, path):
+        return path in self.dirty
+
+    def mark_clean(self, path):
+        self.dirty.discard(path)
 
 
 @pytest.fixture
@@ -75,9 +82,52 @@ def test_save_all_handles_loaded_empty_but_leaves_unloaded_annotations(dataset):
     original = "0 0.2 0.2 0.1 0.1\n"
     other_txt.write_text(original)
     labels.items[str(source)] = []
+    labels.dirty.add(str(source))
     assert saver.save_all_images({0: "defect"}) == (1, 0, 0)
     assert first_txt.read_text() == ""
     assert other_txt.read_text() == original
+
+
+def test_view_only_images_do_not_create_or_rewrite_label_files(dataset):
+    source, project, _, _ = dataset
+    manager = LabelManager()
+    saver = SaveManager(manager, project)
+    label_path = Path(project.get_label_path(str(source)))
+
+    manager.set_labels(str(source), [])
+    assert not manager.is_dirty(str(source))
+    assert saver.save_all_images({0: "defect"}) == (0, 0, 0)
+    assert not label_path.exists()
+
+    original = "0 0.5 0.5 0.3 0.2\n"
+    label_path.write_text(original)
+    loaded = LabelItem(0, "defect", "bbox",
+                       [(10.5, 8.0), (19.5, 8.0), (19.5, 12.0), (10.5, 12.0)])
+    manager.set_labels(str(source), [loaded])
+    assert saver.save_all_images({0: "defect"}) == (0, 0, 0)
+    assert label_path.read_text() == original
+
+
+def test_real_edit_saves_once_and_deleting_last_label_writes_empty_txt(dataset):
+    source, project, _, _ = dataset
+    manager = LabelManager()
+    saver = SaveManager(manager, project)
+    label_path = Path(project.get_label_path(str(source)))
+    label = LabelItem(0, "defect", "bbox",
+                      [(3.0, 2.0), (12.0, 2.0), (12.0, 8.0), (3.0, 8.0)])
+
+    manager.set_labels(str(source), [])
+    manager.add_label(str(source), label)
+    assert manager.is_dirty(str(source))
+    assert saver.save_all_images({0: "defect"}) == (1, 0, 0)
+    assert label_path.read_text().strip()
+    assert not manager.is_dirty(str(source))
+    assert saver.save_all_images({0: "defect"}) == (0, 0, 0)
+
+    manager.remove_label(str(source), 0)
+    assert manager.is_dirty(str(source))
+    assert saver.save_all_images({0: "defect"}) == (1, 0, 0)
+    assert label_path.read_text() == ""
 
 
 def test_invalid_mask_cannot_partially_replace_existing_txt(dataset):

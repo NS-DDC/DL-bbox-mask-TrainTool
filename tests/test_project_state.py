@@ -35,13 +35,45 @@ def test_replace_auto_labels_is_one_undo_and_retains_empty_loaded_state(app):
     manager = LabelManager()
     original = LabelItem(0, "scratch", "bbox", [(0., 0.), (4., 0.), (4., 4.), (0., 4.)])
     manager.set_labels("image", [original])
+    assert not manager.is_dirty("image")
     manager.replace_labels("image", [])
+    assert manager.is_dirty("image")
     assert manager.is_image_loaded("image")
     assert manager.get_labels("image") == []
     manager.undo_stack.undo()
     assert manager.get_labels("image")[0].points == original.points
+    assert not manager.is_dirty("image")
     manager.undo_stack.redo()
     assert manager.get_labels("image") == []
+    assert manager.is_dirty("image")
+
+
+def test_mask_canvas_round_trip_does_not_dirty_unchanged_union(app):
+    manager = LabelManager()
+    first = np.zeros((4, 5), np.uint8)
+    second = np.zeros((4, 5), np.uint8)
+    first[0:2, 0:2] = 255
+    second[2:4, 3:5] = 255
+    manager.set_labels("image", [
+        LabelItem(0, "mask", "mask", mask_data=first),
+        LabelItem(0, "mask", "mask", mask_data=second),
+    ])
+
+    manager.set_labels("image", [], mark_clean=False)
+    manager.add_label("image", LabelItem(
+        0, "mask", "mask", mask_data=np.maximum(first, second)
+    ))
+    assert not manager.is_dirty("image")
+
+
+def test_explicit_empty_auto_label_result_remains_saveable(app):
+    manager = LabelManager()
+    manager.set_labels("image", [])
+
+    manager.replace_labels("image", [])
+    assert manager.is_dirty("image")
+    manager.mark_clean("image")
+    assert not manager.is_dirty("image")
 
 
 def test_remove_and_undo_mask_does_not_compare_numpy_arrays(app):

@@ -104,18 +104,19 @@ class SaveManager:
             destination = Path(self._project.image_dir) / "images" / Path(image_path).name
             if copy_original_image(image_path, destination):
                 saved.append("image")
+        self._labels.mark_clean(image_path)
         return saved
 
     def save_all_images(
         self, class_names: dict[int, str], *, copy_original: bool = False,
     ) -> tuple[int, int, int]:
-        """Save loaded/edited images only; leave never-loaded disk labels intact."""
+        """Save edited images only; viewing an image never creates annotations."""
         if not self._project.image_dir:
             return 0, 0, 0
         self._project.assert_unique_image_stems()
         label_count = gt_count = image_count = 0
         for image_path in self._project.image_list:
-            if not self._labels.is_image_loaded(image_path):
+            if not self._labels.is_dirty(image_path):
                 continue
             image = read_image(image_path)
             if image is None:
