@@ -15,7 +15,9 @@ SUPPORTED_IMAGE_EXTENSIONS: set[str] = {
     ".jpeg",
     ".png",
     ".bmp",
+    ".tif",
     ".tiff",
+    ".webp",
 }
 
 
@@ -71,13 +73,15 @@ class ProjectManager(QObject):
         if not folder.is_dir():
             return False
 
-        self._image_dir = folder.resolve()
-
-        # Create labels subdirectory
-        self._label_dir = self._image_dir / "labels"
-        self._label_dir.mkdir(exist_ok=True)
-
-        self._scan_images()
+        folder = folder.resolve()
+        images = self._find_images(folder)
+        self._validate_unique_stems(images)
+        label_dir = folder / "labels"
+        label_dir.mkdir(exist_ok=True)
+        # Commit only after validation so a failed open keeps the old project.
+        self._image_dir = folder
+        self._label_dir = label_dir
+        self._image_list = images
 
         self.folder_changed.emit()
         self.image_list_updated.emit()
@@ -102,9 +106,21 @@ class ProjectManager(QObject):
         return str(self._label_dir / (img.stem + ".txt"))
 
     def has_labels(self, image_path: str) -> bool:
-        """Return ``True`` if a label file already exists for the image."""
+        """Return ``True`` if a label txt file or GT mask image exists for the image."""
         label_path = self.get_label_path(image_path)
-        return os.path.isfile(label_path)
+        if os.path.isfile(label_path):
+            return True
+        # Also check gt_image/<class>/<stem>.* directories
+        if self._image_dir is not None:
+            gt_dir = self._image_dir / "gt_image"
+            if gt_dir.is_dir():
+                img_stem = Path(image_path).stem
+                for class_dir in gt_dir.iterdir():
+                    if class_dir.is_dir():
+                        for f in class_dir.iterdir():
+                            if f.is_file() and f.stem == img_stem:
+                                return True
+        return False
 
     def get_image_index(self, image_path: str) -> int:
         """Return the index of *image_path* in the image list, or -1."""
@@ -112,6 +128,17 @@ class ProjectManager(QObject):
             return self._image_list.index(image_path)
         except ValueError:
             return -1
+
+    def remove_image(self, image_path: str) -> None:
+        """Remove a single image from the list without re-scanning the folder.
+
+        This avoids clearing the label cache for all other images.
+        """
+        try:
+            self._image_list.remove(image_path)
+        except ValueError:
+            pass
+        self.image_list_updated.emit()
 
     def refresh(self) -> None:
         """Re-scan the current folder for images."""
@@ -152,10 +179,31 @@ class ProjectManager(QObject):
 
     def _scan_images(self) -> None:
         """Populate ``_image_list`` by scanning ``_image_dir``."""
-        self._image_list.clear()
         if self._image_dir is None:
+            self._image_list.clear()
             return
+        images = self._find_images(self._image_dir)
+        self._validate_unique_stems(images)
+        self._image_list = images
 
-        for entry in sorted(self._image_dir.iterdir()):
-            if entry.is_file() and entry.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS:
-                self._image_list.append(str(entry))
+    def assert_unique_image_stems(self) -> None:
+        """Refuse ambiguous YOLO/GT filenames such as wafer.jpg + wafer.png."""
+        self._validate_unique_stems(self._image_list)
+
+    @staticmethod
+    def _find_images(folder: Path) -> list[str]:
+        return [str(entry) for entry in sorted(folder.iterdir())
+                if entry.is_file() and entry.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS]
+
+    @staticmethod
+    def _validate_unique_stems(images: list[str]) -> None:
+        stems: dict[str, str] = {}
+        for image in images:
+            stem = Path(image).stem.casefold()
+            if stem in stems:
+                raise ValueError(
+                    "Images must have unique filenames before their extensions: "
+                    f"{Path(stems[stem]).name}, {Path(image).name}. "
+                    "Rename one image before opening this folder to prevent labels being mixed."
+                )
+            stems[stem] = image

@@ -3,13 +3,14 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
     QPushButton, QLabel, QInputDialog, QColorDialog, QGroupBox,
-    QAbstractItemView, QMessageBox, QComboBox,
+    QAbstractItemView, QMessageBox, QComboBox, QSpinBox,
 )
 from PySide6.QtGui import QColor, QPixmap, QIcon
 from PySide6.QtCore import Signal, Qt
 
 from config import get_config
 from i18n import tr
+from core.project_metadata import validate_class_name
 
 
 # Default color palette for classes
@@ -26,14 +27,18 @@ class LabelListWidget(QWidget):
     instance_selected = Signal(int)  # label index within current image
     class_added = Signal(str, str)  # name, color
     class_removed = Signal(int)  # class index
+    classes_changed = Signal()
     delete_instance_requested = Signal(int)  # label index
+    visibility_changed = Signal(int, bool)  # label index, visible
 
     def __init__(self, parent: QWidget = None):
         super().__init__(parent)
         self._classes: list[dict] = []  # [{name, color}, ...]
         self._current_labels: list = []  # store for re-rendering on format change
         self._image_size: tuple[int, int] = (0, 0)
+        self._visibility: list[bool] = []  # per-label visibility state
         self._config = get_config()
+        self.can_remove_class = lambda index: True
         self._setup_ui()
 
     def _setup_ui(self):
@@ -49,6 +54,20 @@ class LabelListWidget(QWidget):
         self._class_list.currentRowChanged.connect(self._on_class_row_changed)
         self._class_list.itemDoubleClicked.connect(self._on_class_double_clicked)
         classes_layout.addWidget(self._class_list)
+
+        id_layout = QHBoxLayout()
+        self._class_id_label = QLabel(tr("improved_class_id"))
+        self._class_id_spin = QSpinBox()
+        self._class_id_spin.setRange(-1, -1)
+        self._class_id_spin.setSpecialValueText("—")
+        self._class_id_spin.setEnabled(False)
+        self._class_id_spin.valueChanged.connect(self.select_class)
+        id_layout.addWidget(self._class_id_label)
+        id_layout.addWidget(self._class_id_spin)
+        classes_layout.addLayout(id_layout)
+        self._class_id_hint = QLabel(tr("improved_class_id_hint"))
+        self._class_id_hint.setWordWrap(True)
+        classes_layout.addWidget(self._class_id_hint)
 
         btn_layout = QHBoxLayout()
         self._add_btn = QPushButton(tr("label_add_class"))
@@ -84,11 +103,21 @@ class LabelListWidget(QWidget):
         self._instance_list = QListWidget()
         self._instance_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._instance_list.currentRowChanged.connect(self._on_instance_row_changed)
+        self._instance_list.itemChanged.connect(self._on_item_changed)
         inst_layout.addWidget(self._instance_list)
 
         self._delete_inst_btn = QPushButton(tr("action_delete_label"))
         self._delete_inst_btn.clicked.connect(self._on_delete_instance)
         inst_layout.addWidget(self._delete_inst_btn)
+
+        vis_btn_layout = QHBoxLayout()
+        self._show_all_btn = QPushButton(tr("label_show_all"))
+        self._show_all_btn.clicked.connect(self._on_show_all)
+        vis_btn_layout.addWidget(self._show_all_btn)
+        self._hide_all_btn = QPushButton(tr("label_hide_all"))
+        self._hide_all_btn.clicked.connect(self._on_hide_all)
+        vis_btn_layout.addWidget(self._hide_all_btn)
+        inst_layout.addLayout(vis_btn_layout)
 
         self._no_labels_label = QLabel(tr("label_no_labels"))
         self._no_labels_label.setStyleSheet("color: gray; padding: 4px;")
@@ -101,11 +130,11 @@ class LabelListWidget(QWidget):
 
     def set_classes(self, classes: list[dict]):
         """Set class list. Each dict has 'name' and 'color' keys."""
-        self._classes = classes
-        self._refresh_class_list()
+        self._classes = [dict(cls) for cls in classes]
+        self._refresh_class_list(selected=0 if classes else -1)
 
     def get_classes(self) -> list[dict]:
-        return self._classes.copy()
+        return [dict(cls) for cls in self._classes]
 
     def get_class_count(self) -> int:
         return len(self._classes)
@@ -123,28 +152,64 @@ class LabelListWidget(QWidget):
     def selected_class_id(self) -> int:
         return self._class_list.currentRow()
 
-    def _refresh_class_list(self):
+    def add_class(self, name: str, color: str = None, *, select: bool = True) -> int:
+        """Add a class programmatically. Returns the new class index."""
+        name = validate_class_name(name)
+        # Check if already exists
+        for i, cls in enumerate(self._classes):
+            if cls["name"].casefold() == name.casefold():
+                if select:
+                    self.select_class(i)
+                return i
+        if color is None:
+            color_idx = len(self._classes) % len(DEFAULT_COLORS)
+            color = DEFAULT_COLORS[color_idx]
+        self._classes.append({"name": name, "color": color})
+        previous = self.selected_class_id()
+        selected = len(self._classes) - 1 if select else max(0, previous)
+        self._refresh_class_list(selected=selected)
+        self.classes_changed.emit()
+        return len(self._classes) - 1
+
+    def select_class(self, index: int):
+        """Select the stored class ID and synchronize every drawing tool."""
+        if 0 <= index < self._class_list.count():
+            self._class_list.setCurrentRow(index)
+
+    def _refresh_class_list(self, selected=None):
+        if selected is None:
+            selected = self.selected_class_id()
+        self._class_list.blockSignals(True)
         self._class_list.clear()
-        for cls in self._classes:
-            item = QListWidgetItem(cls["name"])
+        for class_id, cls in enumerate(self._classes):
+            shortcut = str(class_id + 1) if class_id < 9 else "0" if class_id == 9 else "—"
+            item = QListWidgetItem(f"[{class_id}] {cls['name']}")
+            item.setToolTip(tr("improved_class_row_hint").format(id=class_id, key=shortcut))
             color = QColor(cls["color"])
             pixmap = QPixmap(16, 16)
             pixmap.fill(color)
             item.setIcon(QIcon(pixmap))
             self._class_list.addItem(item)
+        selected = min(max(0, selected), len(self._classes) - 1) if self._classes else -1
+        self._class_list.setCurrentRow(selected)
+        self._class_list.blockSignals(False)
+        self._on_class_row_changed(selected)
 
     def _on_add_class(self):
         name, ok = QInputDialog.getText(self, tr("label_add_class"), tr("label_class_name"))
         if ok and name.strip():
-            color_idx = len(self._classes) % len(DEFAULT_COLORS)
-            color = DEFAULT_COLORS[color_idx]
-            self._classes.append({"name": name.strip(), "color": color})
-            self._refresh_class_list()
-            self.class_added.emit(name.strip(), color)
+            try:
+                index = self.add_class(name)
+                self.class_added.emit(self._classes[index]["name"], self._classes[index]["color"])
+            except ValueError as exc:
+                QMessageBox.warning(self, tr("warning"), str(exc))
 
     def _on_remove_class(self):
         row = self._class_list.currentRow()
         if row >= 0:
+            if row != len(self._classes) - 1 or not self.can_remove_class(row):
+                QMessageBox.warning(self, tr("warning"), tr("improved_class_remove_blocked"))
+                return
             reply = QMessageBox.question(
                 self, tr("warning"), tr("confirm_delete"),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -153,10 +218,16 @@ class LabelListWidget(QWidget):
                 self._classes.pop(row)
                 self._refresh_class_list()
                 self.class_removed.emit(row)
+                self.classes_changed.emit()
 
     def _on_class_row_changed(self, row: int):
-        if row >= 0:
-            self.class_selected.emit(row)
+        self._class_id_spin.blockSignals(True)
+        self._class_id_spin.setSpecialValueText("" if self._classes else "—")
+        self._class_id_spin.setRange(-1 if not self._classes else 0, len(self._classes) - 1)
+        self._class_id_spin.setValue(row)
+        self._class_id_spin.setEnabled(bool(self._classes))
+        self._class_id_spin.blockSignals(False)
+        self.class_selected.emit(row)
 
     def _on_class_double_clicked(self, item: QListWidgetItem):
         row = self._class_list.row(item)
@@ -166,6 +237,7 @@ class LabelListWidget(QWidget):
             if color.isValid():
                 self._classes[row]["color"] = color.name()
                 self._refresh_class_list()
+                self.classes_changed.emit()
 
     # --- Instance management ---
 
@@ -174,16 +246,32 @@ class LabelListWidget(QWidget):
         self._image_size = (width, height)
 
     def set_instances(self, labels: list):
-        """Set label instances for current image. Each item has class_name, label_type."""
+        """Set label instances for current image. Each item has class_name, label_type.
+
+        Visibility is preserved when the label count is unchanged (e.g. after
+        editing a bbox handle) so that the user's show/hide choices survive
+        label-update refreshes.
+        """
         self._current_labels = labels
+        new_count = len(labels)
+        if len(self._visibility) != new_count:
+            # Count changed (add / delete / new image) → reset to all-visible
+            self._visibility = [True] * new_count
+        # else: same count → keep existing visibility
         self._refresh_instance_list()
+
+    def get_visibility(self) -> list[bool]:
+        """Return the current per-label visibility list."""
+        return list(self._visibility)
 
     def _refresh_instance_list(self):
         """Re-render instance list with current coordinate format."""
+        self._instance_list.blockSignals(True)
         self._instance_list.clear()
         labels = self._current_labels
         if not labels:
             self._no_labels_label.show()
+            self._instance_list.blockSignals(False)
             return
 
         self._no_labels_label.hide()
@@ -199,10 +287,20 @@ class LabelListWidget(QWidget):
             pixmap = QPixmap(12, 12)
             pixmap.fill(color)
             item.setIcon(QIcon(pixmap))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            visible = self._visibility[i] if i < len(self._visibility) else True
+            item.setCheckState(Qt.CheckState.Checked if visible else Qt.CheckState.Unchecked)
             self._instance_list.addItem(item)
+
+        self._instance_list.blockSignals(False)
 
     def _format_coords(self, label, fmt: str, img_w: int, img_h: int) -> str:
         """Format coordinate info string based on selected format."""
+        if label.label_type == "mask":
+            if label.mask_data is not None:
+                pixel_count = int((label.mask_data > 0).sum())
+                return f"mask ({pixel_count}px)"
+            return "mask"
         if label.label_type == "bbox" and len(label.points) == 4:
             xs = [p[0] for p in label.points]
             ys = [p[1] for p in label.points]
@@ -229,6 +327,8 @@ class LabelListWidget(QWidget):
         self._refresh_instance_list()
 
     def clear_instances(self):
+        self._current_labels = []
+        self._visibility = []
         self._instance_list.clear()
         self._no_labels_label.show()
 
@@ -245,12 +345,36 @@ class LabelListWidget(QWidget):
         if row >= 0:
             self.delete_instance_requested.emit(row)
 
+    def _on_item_changed(self, item: QListWidgetItem):
+        index = self._instance_list.row(item)
+        if 0 <= index < len(self._visibility):
+            visible = item.checkState() == Qt.CheckState.Checked
+            self._visibility[index] = visible
+            self.visibility_changed.emit(index, visible)
+
+    def _on_show_all(self):
+        self._visibility = [True] * len(self._current_labels)
+        self._refresh_instance_list()
+        for i in range(len(self._current_labels)):
+            self.visibility_changed.emit(i, True)
+
+    def _on_hide_all(self):
+        self._visibility = [False] * len(self._current_labels)
+        self._refresh_instance_list()
+        for i in range(len(self._current_labels)):
+            self.visibility_changed.emit(i, False)
+
     def retranslate(self):
         self._classes_group.setTitle(tr("label_classes_title"))
+        self._class_id_label.setText(tr("improved_class_id"))
+        self._class_id_hint.setText(tr("improved_class_id_hint"))
+        self._refresh_class_list()
         self._instances_group.setTitle(tr("label_instances_title"))
         self._add_btn.setText(tr("label_add_class"))
         self._remove_btn.setText(tr("label_remove_class"))
         self._delete_inst_btn.setText(tr("action_delete_label"))
+        self._show_all_btn.setText(tr("label_show_all"))
+        self._hide_all_btn.setText(tr("label_hide_all"))
         self._no_labels_label.setText(tr("label_no_labels"))
         self._coord_label.setText(tr("bbox_coord_format"))
         self._coord_combo.setItemText(0, tr("bbox_coord_absolute"))

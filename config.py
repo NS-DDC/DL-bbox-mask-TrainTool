@@ -5,20 +5,22 @@ import os
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
-CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".visionace")
+CONFIG_DIR = os.environ.get("VISIONACE_HOME", os.path.join(os.path.expanduser("~"), ".visionace-improved"))
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 
 @dataclass
 class AppConfig:
-    language: str = "en"
+    language: str = "ko"
     recent_image_dir: str = ""
     recent_model_path: str = ""
     recent_export_dir: str = ""
     auto_save: bool = True
     bbox_coord_format: str = "absolute"  # "absolute" or "relative"
     default_confidence: float = 0.5
-    default_model_type: str = "RT-DETR"
+    default_model_type: str = "AUTO"
+    copy_original_on_save: bool = False
+    model_types: dict = field(default_factory=dict)
     window_width: int = 1400
     window_height: int = 900
     class_colors: dict = field(default_factory=dict)
