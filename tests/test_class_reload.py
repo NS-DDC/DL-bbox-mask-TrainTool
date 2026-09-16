@@ -168,6 +168,20 @@ def test_mask_edit_is_one_undo_and_redo_keeps_original_class(windows, dataset):
     assert window._canvas._current_class_id == 2
 
 
+@pytest.mark.parametrize("save_method", ["_save_current_labels", "_save_project"])
+def test_saved_mask_remains_erasable_without_changing_mode(windows, dataset, save_method):
+    window = windows(dataset)
+    window._toolbar.set_mode(ToolMode.SEGMENTATION)
+    window._canvas._current_mask[3:9, 4:12] = 255
+    assert getattr(window, save_method)()
+    assert window._canvas._mask_edit_originals
+    assert window._canvas._current_mask.any()
+    window._canvas._current_mask[:] = 0
+    assert getattr(window, save_method)()
+    reopened = windows(dataset)
+    assert reopened._labels.get_labels(reopened._current_image_path) == []
+
+
 @pytest.mark.parametrize("mode", [ToolMode.DETECTION, ToolMode.SEGMENTATION])
 def test_switch_class_finishes_pending_polygon_with_its_original_id(windows, dataset, mode):
     window = windows(dataset)

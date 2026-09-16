@@ -379,6 +379,7 @@ class MainWindow(QMainWindow):
                 copy_original=self._config.copy_original_on_save)
             self._status_bar.showMessage(tr("improved_saved").format(
                 labels=counts[0], masks=counts[1], images=counts[2]), 5000)
+            self._resume_mask_edit()
             return True
         except Exception as exc:
             QMessageBox.critical(self, tr("improved_save_failed"), str(exc))
@@ -772,6 +773,10 @@ class MainWindow(QMainWindow):
             original_labels=selected_masks,
         )
 
+    def _resume_mask_edit(self):
+        if self._current_image_path and self._canvas._mode == ToolMode.SEGMENTATION:
+            self._auto_load_mask_for_segmentation(self._current_image_path)
+
     @Slot(int)
     def _on_brush_size_changed(self, size: int):
         """Update canvas brush size."""
@@ -983,6 +988,7 @@ class MainWindow(QMainWindow):
             if self._canvas.has_unfinished_mask():
                 self._canvas.finalize_pending_mask()
             if not self._labels.is_dirty(self._current_image_path):
+                self._resume_mask_edit()
                 return True
             classes = self._label_list.get_classes()
             save_classes(self._project.label_dir, classes)
@@ -990,6 +996,7 @@ class MainWindow(QMainWindow):
                 {i: c["name"] for i, c in enumerate(classes)},
                 self._canvas.get_image_size(),
                 copy_original=self._config.copy_original_on_save)
+            self._resume_mask_edit()
             return True
         except Exception as exc:
             QMessageBox.critical(self, tr("improved_save_failed"), str(exc))

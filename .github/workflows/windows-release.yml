@@ -40,7 +40,13 @@ jobs:
           "MPLCONFIGDIR=$env:RUNNER_TEMP\visionace-ci\matplotlib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           python -m pip install --upgrade pip
           if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed" }
-          python -m pip install -r requirements-cpu.txt
+          # Official wheel CDN can return transient 5xx errors. Retry the
+          # identical pinned CPU install; never fall back to another build.
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            python -m pip install -r requirements-cpu.txt
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -lt 3) { Start-Sleep -Seconds 15 }
+          }
           if ($LASTEXITCODE -ne 0) { throw "CPU runtime installation failed" }
           python -m pip install -r requirements.txt -r requirements-build.txt
           if ($LASTEXITCODE -ne 0) { throw "Application dependencies failed" }
