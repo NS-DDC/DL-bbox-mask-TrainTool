@@ -10,7 +10,7 @@ def test_import_does_not_start_qt_or_load_models():
     # main keeps the expensive and GUI imports inside main(), not module scope.
     module = importlib.import_module("main")
     assert callable(module.main)
-    assert module.APP_VERSION == "1.9.0-improved.4"
+    assert module.APP_VERSION == "1.9.0-improved.5"
 
 
 def test_version_does_not_need_gui(monkeypatch, capsys):
