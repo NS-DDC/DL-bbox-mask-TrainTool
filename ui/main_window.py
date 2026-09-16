@@ -20,6 +20,7 @@ from core.export_manager import ExportManager
 from core.save_manager import SaveManager
 from core.image_io import read_image
 from core.project_metadata import load_classes, save_classes
+from core.class_mapping import plan_model_classes
 from ui.canvas_widget import CanvasWidget
 from ui.file_list_widget import FileListWidget
 from ui.label_list_widget import LabelListWidget
@@ -51,7 +52,6 @@ class MainWindow(QMainWindow):
         self._model_loader = None
         self._opening_classes = []
         self._restoring_project = False
-        self._skip_auto_load_mask = False  # suppress auto-load during explicit mask edit
         self._discard_pending_mask = False  # discard (not finalize) mask on next image switch
 
         self._setup_ui()
@@ -279,6 +279,7 @@ class MainWindow(QMainWindow):
         self._canvas.label_delete_requested.connect(self._on_delete_instance)
         self._canvas.brush_size_changed_from_canvas.connect(self._on_canvas_brush_size_changed)
         self._canvas.edit_mask_requested.connect(self._on_edit_mask_requested)
+        self._canvas.mask_edit_finished.connect(self._on_mask_edit_finished)
         self._canvas.class_switch_requested.connect(self._on_class_switch_by_number)
 
         # Label list signals
@@ -395,6 +396,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, tr("improved_save_failed"), str(exc))
 
     def _can_remove_class(self, index):
+        if self._canvas.has_unfinished_mask():
+            return False
         if any(self._labels.get_labels(p) for p in self._labels.loaded_image_paths):
             return False
         if self._project.label_dir:
@@ -498,17 +501,23 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, tr("error"), str(exc))
 
     def _on_undo(self):
+        self._canvas.finalize_pending_mask()
         self._labels.undo_stack.undo()
+        if self._canvas._mode == ToolMode.SEGMENTATION:
+            self._auto_load_mask_for_segmentation(self._current_image_path)
 
     def _on_redo(self):
+        self._canvas.finalize_pending_mask()
         self._labels.undo_stack.redo()
+        if self._canvas._mode == ToolMode.SEGMENTATION:
+            self._auto_load_mask_for_segmentation(self._current_image_path)
 
     def _on_delete_selected(self):
         # Delete currently selected label from canvas
         if self._current_image_path:
             selected_idx = self._canvas.get_selected_index()
             if selected_idx >= 0:
-                self._labels.remove_label(self._current_image_path, selected_idx)
+                self._on_delete_instance(selected_idx)
 
     def _on_auto_label(self):
         if not self._model.is_loaded or self._model_loader is not None:
@@ -519,9 +528,20 @@ class MainWindow(QMainWindow):
         if self._canvas.has_unfinished_mask():
             self._canvas.finalize_pending_mask()
         existing = {p for p in self._project.image_list
-                    if self._project.has_labels(p) or self._labels.label_count(p) > 0}
+                    if self._project.has_labels(p) or self._labels.label_count(p) > 0
+                    or self._labels.is_dirty(p)}
+        try:
+            names = self._model.get_class_names()
+            planned, mapping = plan_model_classes(self._label_list.get_classes(), names)
+            mapping_text = "\n".join(
+                f"[{model_id}] {names[model_id]} → [{project_id}] {planned[project_id]['name']}"
+                for model_id, project_id in mapping.items())
+        except ValueError as exc:
+            QMessageBox.warning(self, tr("warning"), str(exc))
+            return
         dialog = AutoLabelDialog(self._model, self._project.image_list,
-            self._file_list.current_index(), self, existing_paths=existing)
+            self._file_list.current_index(), self, existing_paths=existing,
+            class_mapping_text=mapping_text)
         def apply(image_path, labels):
             try:
                 self._apply_auto_labels(image_path, labels, dialog.apply_policy)
@@ -586,6 +606,7 @@ class MainWindow(QMainWindow):
         self._current_image_path = ""
         self._labels.clear()
         self._canvas.clear_canvas()
+        self._label_list.clear_instances()
         self._restoring_project = True
         try:
             self._label_list.set_classes(self._opening_classes)
@@ -626,6 +647,7 @@ class MainWindow(QMainWindow):
             self._restore_file_selection()
             return
         self._current_image_path = img_path
+        self._label_list.clear_instances()
 
         # Lazy-load labels from disk if not yet loaded
         try:
@@ -642,7 +664,7 @@ class MainWindow(QMainWindow):
         if self._canvas._mode == ToolMode.SEGMENTATION:
             self._auto_load_mask_for_segmentation(img_path)
 
-        # Display labels (mask labels already removed if in SEGMENTATION)
+        # Editing masks stay in the manager until an actual change is committed.
         labels = self._labels.get_labels(img_path)
         self._canvas.display_labels(labels)
         w, h = self._canvas.get_image_size()
@@ -710,25 +732,23 @@ class MainWindow(QMainWindow):
     def _on_mode_changed(self, mode: str):
         if self._current_image_path and not self._labels.is_image_loaded(self._current_image_path):
             return
+        if mode == self._canvas._mode:
+            return
         # Finalize pending mask only when LEAVING segmentation.
         # When entering segmentation, _auto_load_mask_for_segmentation
         # handles it and would conflict with an early finalize (wrong class).
         if mode != ToolMode.SEGMENTATION and self._canvas.has_unfinished_mask():
             self._canvas.finalize_pending_mask()
         self._canvas.set_mode(mode)
-        # When switching to SEGMENTATION mode, auto-load existing mask for current image
-        # (skipped when _on_edit_mask_requested already loaded a specific mask)
+        # Enter the selected class's mask without changing the class selection.
         if mode == ToolMode.SEGMENTATION and self._current_image_path:
-            if not self._skip_auto_load_mask:
-                self._auto_load_mask_for_segmentation(self._current_image_path)
+            self._auto_load_mask_for_segmentation(self._current_image_path)
 
     def _auto_load_mask_for_segmentation(self, img_path: str):
         """If in SEGMENTATION mode and image has mask labels, auto-load them into the brush canvas."""
-        if not self._labels.is_image_loaded(img_path):
+        if not self._labels.is_image_loaded(img_path) or self._canvas.has_unfinished_mask():
             return
-        # Use get_labels_ref so id()-based removal below works on the
-        # actual internal objects (get_labels returns copies).
-        labels = self._labels.get_labels_ref(img_path)
+        labels = self._labels.get_labels(img_path)
         mask_labels = [l for l in labels if l.label_type == "mask"]
         if not mask_labels:
             return
@@ -739,7 +759,7 @@ class MainWindow(QMainWindow):
         selected_class_id = self._label_list.selected_class_id()
         selected_masks = [l for l in mask_labels if l.class_id == selected_class_id]
         if not selected_masks:
-            selected_masks = mask_labels[:1]
+            return
         combined = np.zeros((h, w), dtype=np.uint8)
         for ml in selected_masks:
             if ml.mask_data is not None:
@@ -749,20 +769,8 @@ class MainWindow(QMainWindow):
             combined, label_to_edit.color,
             class_id=label_to_edit.class_id,
             class_name=label_to_edit.class_name,
+            original_labels=selected_masks,
         )
-        # Sync label-list class selection to match the loaded mask
-        self._label_list.select_class(label_to_edit.class_id)
-
-        # Remove the merged mask labels from label manager in one batch
-        # to avoid N separate labels_changed emissions (one per remove).
-        # Use get_labels_ref so we work on the actual internal list objects
-        # (get_labels returns copies whose id() would never match).
-        selected_set = set(id(m) for m in selected_masks)
-        ref_labels = self._labels.get_labels_ref(img_path)
-        remaining = [l for l in ref_labels if id(l) not in selected_set]
-        # This is an in-memory transfer into the brush, not a user edit.  Keep
-        # the disk baseline so an unchanged mask is clean when finalized again.
-        self._labels.set_labels(img_path, remaining, mark_clean=False)
 
     @Slot(int)
     def _on_brush_size_changed(self, size: int):
@@ -783,28 +791,26 @@ class MainWindow(QMainWindow):
         if 0 <= index < len(labels):
             label = labels[index]
             if label.label_type == "mask" and label.mask_data is not None:
-                # Load mask into canvas for editing (with class info so
-                # finalize_pending_mask uses the correct class).
-                self._canvas.load_mask_for_editing(
-                    label.mask_data.copy(), label.color,
-                    class_id=label.class_id,
-                    class_name=label.class_name,
-                )
-                # Remove the old label (use set_labels to update without losing others)
-                self._labels.remove_label(self._current_image_path, index)
-                # Switch to segmentation mode.  Suppress auto-load so that
-                # _auto_load_mask_for_segmentation does NOT overwrite the mask
-                # we just loaded for editing.
-                self._skip_auto_load_mask = True
+                self._canvas.finalize_pending_mask()
+                self._label_list.select_class(label.class_id)
                 self._toolbar.set_mode(ToolMode.SEGMENTATION)
-                self._skip_auto_load_mask = False
-                # Sync class selection to match the mask's class
-                classes = self._label_list.get_classes()
-                for i, cls in enumerate(classes):
-                    if cls["name"] == label.class_name:
-                        self._label_list.select_class(i)
-                        break
+                self._auto_load_mask_for_segmentation(self._current_image_path)
                 self._status_bar.showMessage(tr("mask_edit_status"), 3000)
+
+    @Slot(object, object)
+    def _on_mask_edit_finished(self, originals, replacement):
+        """Commit a brush edit atomically; simply viewing a mask is a no-op."""
+        path = self._current_image_path
+        labels = self._labels.get_labels(path)
+        if not all(any(item is original for item in labels) for original in originals):
+            self._on_labels_changed(path)
+            return
+        remaining = [item for item in labels if not any(item is old for old in originals)]
+        result = remaining + ([replacement] if replacement is not None else [])
+        if self._labels._annotation_signature(result) == self._labels._annotation_signature(labels):
+            self._on_labels_changed(path)
+            return
+        self._labels.replace_labels(path, result, text="Edit mask")
 
     @Slot(str)
     def _on_brush_shape_changed(self, shape: str):
@@ -857,14 +863,18 @@ class MainWindow(QMainWindow):
         """Handle number key 1-0 → switch to class 0-9."""
         if 0 <= class_id < self._label_list.get_class_count():
             self._label_list.select_class(class_id)
-            self._on_class_selected(class_id)
 
     @Slot(int)
     def _on_class_selected(self, class_id: int):
         classes = self._label_list.get_classes()
         if 0 <= class_id < len(classes):
             cls = classes[class_id]
+            changed = class_id != self._canvas._current_class_id
             self._canvas.set_current_class(class_id, cls["name"], cls["color"])
+            if changed and self._canvas._mode == ToolMode.SEGMENTATION and self._current_image_path:
+                self._auto_load_mask_for_segmentation(self._current_image_path)
+        else:
+            self._canvas.set_current_class(-1, "", "#00aaff")
 
     @Slot(int)
     def _on_instance_selected(self, index: int):
@@ -873,6 +883,9 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_delete_instance(self, index: int):
         if self._current_image_path:
+            labels = self._labels.get_labels(self._current_image_path)
+            if 0 <= index < len(labels) and labels[index] in self._canvas._mask_edit_originals:
+                self._canvas.discard_pending_mask()
             self._labels.remove_label(self._current_image_path, index)
 
     @Slot(str)
@@ -914,18 +927,34 @@ class MainWindow(QMainWindow):
 
     def _apply_auto_labels(self, image_path, labels, policy):
         # Default skip never overwrites labels that appeared after the dialog opened.
-        if policy == "skip" and (self._labels.label_count(image_path) or self._project.has_labels(image_path)):
+        if policy == "skip" and (self._labels.label_count(image_path)
+                                 or self._project.has_labels(image_path)
+                                 or self._labels.is_dirty(image_path)):
             return
         self._load_labels_from_disk(image_path)
+        names = self._model.get_class_names()
+        planned, mapping = plan_model_classes(self._label_list.get_classes(), names)
+        for label in labels:
+            if (label.class_id not in mapping
+                    or label.class_name.casefold() != names[label.class_id].strip().casefold()):
+                raise ValueError("Detection class ID/name does not match the loaded model.")
+        if image_path == self._current_image_path:
+            self._canvas.finalize_pending_mask()
+        for class_id, cls in enumerate(planned):
+            actual_id = self._label_list.add_class(cls["name"], select=False)
+            if actual_id != class_id:
+                raise ValueError("Project class mapping changed during auto labeling.")
         mapped = []
         for label in labels:
             label = label.copy()
-            label.class_id = self._label_list.add_class(label.class_name)
+            label.class_id = mapping[label.class_id]
             label.class_name = self._label_list.get_class_name(label.class_id)
             label.color = self._label_list.get_class_color(label.class_id)
             mapped.append(label)
         previous = self._labels.get_labels(image_path)
         self._labels.replace_labels(image_path, previous + mapped if policy == "append" else mapped)
+        if image_path == self._current_image_path and self._canvas._mode == ToolMode.SEGMENTATION:
+            self._auto_load_mask_for_segmentation(image_path)
 
     def _load_labels_from_disk(self, image_path):
         if self._labels.is_image_loaded(image_path):
@@ -940,7 +969,7 @@ class MainWindow(QMainWindow):
         classes = self._label_list.get_classes()
         class_names = {i: c["name"] for i, c in enumerate(classes)}
         labels = self._saver.load_labels_from_disk(image_path, size, class_names,
-                                                  self._label_list.add_class)
+            lambda name: self._label_list.add_class(name, select=False))
         for label in labels:
             label.color = self._label_list.get_class_color(label.class_id)
         self._labels.set_labels(image_path, labels)

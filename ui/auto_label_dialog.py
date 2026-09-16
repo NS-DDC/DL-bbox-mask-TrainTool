@@ -22,7 +22,7 @@ class AutoLabelDialog(QDialog):
     labels_generated = Signal(str, list)
 
     def __init__(self, model_manager, image_paths, current_index=0, parent=None,
-                 *, existing_paths=None):
+                 *, existing_paths=None, class_mapping_text=""):
         super().__init__(parent)
         self._model_manager = model_manager
         self._image_paths = list(image_paths)
@@ -33,6 +33,7 @@ class AutoLabelDialog(QDialog):
         self._success = self._empty = self._errors = self._skipped = 0
         self._start_time = 0.0
         self._active_policy = "skip"
+        self._class_mapping_text = class_mapping_text
         self._setup_ui()
 
     @property
@@ -80,6 +81,12 @@ class AutoLabelDialog(QDialog):
             self._policy_combo.addItem(tr(title), value)
         form.addRow(tr("improved_existing"), self._policy_combo)
         layout.addLayout(form)
+        if self._class_mapping_text:
+            layout.addWidget(QLabel(tr("improved_class_mapping")))
+            self._mapping_preview = QPlainTextEdit(self._class_mapping_text)
+            self._mapping_preview.setReadOnly(True)
+            self._mapping_preview.setMaximumHeight(100)
+            layout.addWidget(self._mapping_preview)
         hint = QLabel(tr("improved_auto_hint"))
         hint.setWordWrap(True)
         layout.addWidget(hint)

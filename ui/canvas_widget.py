@@ -39,6 +39,7 @@ class CanvasWidget(QWidget):
     skip_image_requested = Signal()  # X key pressed to skip
     brush_size_changed_from_canvas = Signal(int)  # +/- key or Ctrl+wheel changed brush size
     edit_mask_requested = Signal(int)  # request to edit mask at index
+    mask_edit_finished = Signal(object, object)  # original labels, replacement or None
     class_switch_requested = Signal(int)  # number key 1-0 → class index 0-9
 
     def __init__(self, parent: QWidget = None):
@@ -76,6 +77,7 @@ class CanvasWidget(QWidget):
         self._erasing = False
         self._current_mask: Optional[np.ndarray] = None
         self._current_mask_color: Optional[str] = None  # Color when mask was started
+        self._mask_edit_originals: list[LabelItem] = []
         self._mask_pixmap_item: Optional[QGraphicsPixmapItem] = None
         self._brush_cursor = None  # Can be QGraphicsEllipseItem or QGraphicsRectItem
         self._brush_snapshot: Optional[np.ndarray] = None  # For undo
@@ -153,6 +155,7 @@ class CanvasWidget(QWidget):
         # Reset mask and mask display for new image
         self._current_mask = None
         self._current_mask_color = None
+        self._mask_edit_originals = []
         self._brush_snapshot = None
         self._brushing = False
         self._erasing = False
@@ -223,13 +226,11 @@ class CanvasWidget(QWidget):
                 self._current_mask_color = self._current_color  # Save color when mask starts
 
     def set_current_class(self, class_id: int, class_name: str, color: str):
-        # If class is changing and there's an active mask, finalize it first
-        if (self._mode == ToolMode.SEGMENTATION and
-            self._current_mask is not None and
-            self._current_mask.max() > 0 and
-            (class_id != self._current_class_id or class_name != self._current_class_name)):
-            # Save current mask before changing class
-            self._finalize_mask()
+        if class_id != self._current_class_id or class_name != self._current_class_name:
+            # Finish valid shapes under the class that started them.  Incomplete
+            # geometry is cancelled, never silently assigned to the new class.
+            self.finish_current_shape()
+            self._reset_drawing_state()
 
         self._current_class_id = class_id
         self._current_class_name = class_name
@@ -270,6 +271,7 @@ class CanvasWidget(QWidget):
         color: str,
         class_id: int | None = None,
         class_name: str | None = None,
+        original_labels: list[LabelItem] | None = None,
     ):
         """Load an existing mask into the canvas for editing.
 
@@ -285,28 +287,35 @@ class CanvasWidget(QWidget):
             raise ValueError(f"Mask dimensions {mask_data.shape} do not match source image {(h, w)}")
         self._current_mask = mask_data.copy()
         self._current_mask_color = color
+        self._mask_edit_originals = list(original_labels or [])
         # Sync class so finalize uses the mask's original class
         if class_id is not None:
             self._current_class_id = class_id
         if class_name is not None:
             self._current_class_name = class_name
+        self._current_color = color
+        for item in self._label_items:
+            if item.label in self._mask_edit_originals:
+                item.graphics_item.setVisible(False)
         self._update_mask_display()
         self._show_brush_cursor()
 
     def finish_current_shape(self):
         """Finish drawing current polygon or mask."""
+        if self._mode == ToolMode.DETECTION and len(self._polygon_points) >= 3:
+            self._finalize_polygon_as_bbox()
         if self._mode == ToolMode.SEGMENTATION:
             # Check if in polygon mode
             if len(self._polygon_points) >= 3:
                 self._finalize_polygon()
             # Check if in mask mode
-            elif self._current_mask is not None and self._current_mask.max() > 0:
+            if self.has_unfinished_mask():
                 self._finalize_mask()
 
     def has_unfinished_mask(self) -> bool:
         """Check if there's an unfinished mask drawing (any mode)."""
         return (self._current_mask is not None and
-                self._current_mask.max() > 0)
+                (bool(self._mask_edit_originals) or self._current_mask.max() > 0))
 
     def finalize_pending_mask(self):
         """Finalize any pending mask regardless of current mode.
@@ -314,11 +323,12 @@ class CanvasWidget(QWidget):
         Use this for cleanup before saving or switching images, so that
         mask data loaded into the brush is not lost.
         """
-        if self._current_mask is not None and self._current_mask.max() > 0:
+        if self.has_unfinished_mask():
             self._finalize_mask()
 
     def discard_pending_mask(self):
         """Discard any pending mask without saving (for skip/next-without-save)."""
+        self._mask_edit_originals = []
         if self._current_mask is not None:
             self._current_mask = np.zeros_like(self._current_mask)
             self._current_mask_color = None
@@ -339,12 +349,15 @@ class CanvasWidget(QWidget):
 
         for label in labels:
             gfx = self._create_label_graphics(label)
+            if label in self._mask_edit_originals:
+                gfx.setVisible(False)
             self._label_items.append(LabelGraphicsItem(label, gfx))
 
     def set_label_visible(self, index: int, visible: bool):
         """Show or hide a label graphics item by index."""
         if 0 <= index < len(self._label_items):
-            self._label_items[index].graphics_item.setVisible(visible)
+            item = self._label_items[index]
+            item.graphics_item.setVisible(visible and item.label not in self._mask_edit_originals)
 
     def highlight_label(self, index: int):
         # Reset previous highlight
@@ -441,6 +454,7 @@ class CanvasWidget(QWidget):
         self._edit_original_points = []
         self._current_mask = None
         self._current_mask_color = None
+        self._mask_edit_originals = []
         self._mask_pixmap_item = None
         self._brush_cursor = None
         self._brush_snapshot = None
@@ -678,7 +692,7 @@ class CanvasWidget(QWidget):
 
     def _finalize_mask(self):
         """Convert current mask to a LabelItem and emit."""
-        if self._current_mask is None or self._current_mask.max() == 0:
+        if not self.has_unfinished_mask():
             return
 
         # Use the color when mask was started
@@ -692,14 +706,18 @@ class CanvasWidget(QWidget):
             color=mask_color,
             mask_data=self._current_mask.copy(),
         )
-        self.label_created.emit(label)
-
         # Reset mask and color for next drawing
+        originals = self._mask_edit_originals
+        self._mask_edit_originals = []
         self._current_mask = np.zeros_like(self._current_mask)
         self._current_mask_color = None  # Reset color
         if self._mask_pixmap_item and self._mask_pixmap_item.scene():
             self._scene.removeItem(self._mask_pixmap_item)
             self._mask_pixmap_item = None
+        if originals:
+            self.mask_edit_finished.emit(originals, label if label.mask_data.any() else None)
+        else:
+            self.label_created.emit(label)
 
     def _reset_drawing_state(self):
         self._drawing = False
@@ -731,6 +749,8 @@ class CanvasWidget(QWidget):
     def _on_mouse_press(self, pos, button=Qt.MouseButton.LeftButton):
         scene_pos = self._scene_pos(pos)
         if scene_pos is None or self._image_pixmap is None:
+            return
+        if self._mode != ToolMode.SELECT and self._current_class_id < 0:
             return
 
         # Segmentation mode - brush or polygon
@@ -1104,6 +1124,8 @@ class CanvasWidget(QWidget):
         else:
             # Number keys 1-9,0 → quick class switch (0-9)
             key = event.key()
+            if event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier):
+                return
             if Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
                 self.class_switch_requested.emit(key - Qt.Key.Key_1)
             elif key == Qt.Key.Key_0:
@@ -1197,6 +1219,9 @@ class _GraphicsView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if self._space_pan or self._panning:
+            self.mousePressEvent(event)
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self.mouse_double_clicked.emit(event.position().toPoint())
         super().mouseDoubleClickEvent(event)

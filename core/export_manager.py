@@ -196,6 +196,10 @@ class ExportManager:
                         cls_name = parts[0]
                         class_id = int(parts[1])
                         values = [float(v) for v in parts[2:]]
+                        if class_id in class_names:
+                            if cls_name.casefold() != class_names[class_id].casefold():
+                                raise ValueError("Class name conflicts with the project class ID mapping")
+                            cls_name = class_names[class_id]
                     if class_id < 0 or class_id >= 65535 or not all(np.isfinite(values)):
                         raise ValueError("Invalid class ID or non-finite coordinates")
                     if any(v < 0 or v > 1 for v in values):

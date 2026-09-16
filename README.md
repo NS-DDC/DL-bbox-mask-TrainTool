@@ -1,10 +1,10 @@
 # VisionAce Improved
 
-**원본 이미지 라벨링과 자동 라벨링을 개선한 별도 Windows 배포판**입니다. 기준은 [VisionAce v1.8.1](https://github.com/NS-DDC/claude_code/releases/tag/v1.8.1)이며, 이 저장소의 `improvements/visionace-v1.9` 브랜치와 `v1.9.0-improved.4` 릴리스로 구분합니다. [원본 출처](docs/UPSTREAM.md) · [변경 이력](CHANGELOG.md)
+**원본 이미지 라벨링과 자동 라벨링을 개선한 별도 Windows 배포판**입니다. 기준은 [VisionAce v1.8.1](https://github.com/NS-DDC/claude_code/releases/tag/v1.8.1)이며, 이 저장소의 `improvements/visionace-v1.9` 브랜치와 `v1.9.0-improved.5` 릴리스로 구분합니다. [원본 출처](docs/UPSTREAM.md) · [변경 이력](CHANGELOG.md)
 
 ## Windows에서 바로 실행
 
-1. [개선판 릴리스](https://github.com/NS-DDC/DL-bbox-mask-TrainTool/releases/tag/v1.9.0-improved.4)에서 `VisionAce-Improved-v1.9.0-improved.4-Windows-x64-CPU.zip`을 받습니다.
+1. [개선판 릴리스](https://github.com/NS-DDC/DL-bbox-mask-TrainTool/releases/tag/v1.9.0-improved.5)에서 `VisionAce-Improved-v1.9.0-improved.5-Windows-x64-CPU.zip`을 받습니다.
 2. ZIP **전체를 압축 해제**하고 `VisionAce-Improved.exe`를 실행합니다.
 3. `_internal` 폴더는 exe 옆에 그대로 둡니다. Python 설치는 필요 없습니다.
 
@@ -36,6 +36,8 @@ JPEG/PNG/BMP/TIF/TIFF와 한글 경로를 지원합니다. EXIF 방향을 자동
 
 클래스 번호가 바뀌지 않도록 프로젝트별 목록을 저장합니다. `classes.txt`가 있으면 줄 순서를 클래스 ID로 가져옵니다. 이름이 같은 `wafer.jpg`와 `wafer.png`는 하나의 YOLO 파일을 공유하게 되므로 함께 열지 못하게 검사합니다. 클래스 삭제는 번호 변경을 방지하기 위해 라벨이 없는 프로젝트의 마지막 클래스만 허용합니다.
 
+클래스 목록의 `[번호]`와 **저장 클래스 ID** 입력칸은 TXT 첫 열에 저장되는 실제 번호입니다. YOLO ID는 `0`부터 시작합니다. 기존 숫자 단축키 `1~9, 0`은 각각 ID `0~9`를 선택하므로, 원하는 번호를 직접 지정하려면 저장 클래스 ID 입력칸을 사용하세요. 다시 열 때 다른 클래스의 마스크가 있더라도 현재 그리기 클래스는 자동으로 바뀌지 않습니다. 기존에 잘못 저장된 라벨 번호를 임의로 재분류하지는 않습니다.
+
 ## 자동 라벨링
 
 1. `파일 → 모델 불러오기`에서 **로컬 모델 파일**을 선택합니다.
@@ -43,6 +45,8 @@ JPEG/PNG/BMP/TIF/TIFF와 한글 경로를 지원합니다. EXIF 방향을 자동
 3. `도구 → 자동 라벨링`에서 신뢰도, 모델 입력 크기, 장치, 라벨 종류와 범위를 선택합니다.
 4. 기본값은 기존 라벨이 있는 이미지 건너뛰기입니다. 필요하면 추가 또는 교체를 고릅니다.
 5. 결과를 검토하고 `Ctrl+S`로 저장합니다. 오류는 대화상자의 상세 목록과 로그에서 확인합니다.
+
+실행 전 **모델 클래스 → 프로젝트 저장 ID** 대응표를 확인할 수 있습니다. 빈 프로젝트는 검출 순서와 관계없이 모델의 원래 ID를 유지합니다. 기존 프로젝트는 같은 이름의 기존 ID를 유지하고 새로운 클래스를 뒤에 추가합니다.
 
 추론 크기는 모델 입력 크기입니다. 화면 해상도나 원본 파일을 바꾸지 않습니다. 아주 작은 객체는 모델 입력에서 작아지므로 크기를 늘릴 수 있지만 메모리 사용도 증가합니다. 정사각형 마스크 패딩을 제거하고 원본 좌표로 복원합니다. 분할 모델은 폴리곤 또는 픽셀 마스크로 결과를 받으며, 내부 구멍을 유지하려면 픽셀 마스크를 선택하세요.
 

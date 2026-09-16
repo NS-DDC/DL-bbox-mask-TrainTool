@@ -178,10 +178,10 @@ class ClearLabelsCommand(QUndoCommand):
 # ---------------------------------------------------------------------------
 
 class ReplaceLabelsCommand(QUndoCommand):
-    """Apply one inference result as a single reversible edit."""
+    """Replace annotations as a single reversible edit."""
 
-    def __init__(self, manager, image_path, labels):
-        super().__init__("Apply auto labels")
+    def __init__(self, manager, image_path, labels, text="Apply auto labels"):
+        super().__init__(text)
         self._manager = manager
         self._path = image_path
         self._old = [label.copy() for label in manager.get_labels(image_path)]
@@ -189,21 +189,20 @@ class ReplaceLabelsCommand(QUndoCommand):
         self._old_forced_dirty = image_path in manager._forced_dirty
 
     def redo(self):
+        # Explicit inference/edit results remain saveable even when empty.
+        self._manager._forced_dirty.add(self._path)
         self._manager.set_labels(
             self._path, [label.copy() for label in self._new], mark_clean=False
         )
-        # An explicit auto-label result is review state even when it contains
-        # zero detections and therefore matches a previously empty image.
-        self._manager._forced_dirty.add(self._path)
 
     def undo(self):
-        self._manager.set_labels(
-            self._path, [label.copy() for label in self._old], mark_clean=False
-        )
         if self._old_forced_dirty:
             self._manager._forced_dirty.add(self._path)
         else:
             self._manager._forced_dirty.discard(self._path)
+        self._manager.set_labels(
+            self._path, [label.copy() for label in self._old], mark_clean=False
+        )
 
 
 class LabelManager(QObject):
@@ -270,8 +269,8 @@ class LabelManager(QObject):
         self._clean_signatures.clear()
         self._forced_dirty.clear()
 
-    def replace_labels(self, image_path: str, labels: list[LabelItem]) -> None:
-        self._undo_stack.push(ReplaceLabelsCommand(self, image_path, labels))
+    def replace_labels(self, image_path: str, labels: list[LabelItem], *, text="Apply auto labels") -> None:
+        self._undo_stack.push(ReplaceLabelsCommand(self, image_path, labels, text))
 
     def get_labels_ref(self, image_path: str) -> list[LabelItem]:
         """Return a direct reference to the internal label list (use with care)."""

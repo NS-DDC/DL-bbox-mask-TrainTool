@@ -38,6 +38,12 @@ def load_classes(label_dir) -> list[dict]:
     if data.get("version") != 1 or not isinstance(data.get("classes"), list):
         raise ValueError(f"Unsupported project class mapping: {path}")
     classes = data["classes"]
+    if any("id" in cls for cls in classes):
+        ids = [cls.get("id") for cls in classes]
+        if (any(type(class_id) is not int for class_id in ids)
+                or sorted(ids) != list(range(len(classes)))):
+            raise ValueError("Project class IDs must be unique and contiguous from 0.")
+        classes = sorted(classes, key=lambda cls: cls["id"])
     names = [validate_class_name(c["name"]) for c in classes]
     if len(set(n.casefold() for n in names)) != len(names):
         raise ValueError("Project has duplicate class names.")
@@ -56,7 +62,10 @@ def save_classes(label_dir, classes: list[dict]) -> None:
     fd, tmp = tempfile.mkstemp(prefix=".classes-", suffix=".tmp", dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump({"version": 1, "classes": classes}, stream, ensure_ascii=False, indent=2)
+            # Persist IDs explicitly; older mappings without IDs retain their
+            # original list-order meaning on load.
+            records = [{**cls, "id": index} for index, cls in enumerate(classes)]
+            json.dump({"version": 1, "classes": records}, stream, ensure_ascii=False, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp, directory / ".visionace-project.json")

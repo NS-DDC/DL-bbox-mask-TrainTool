@@ -3,7 +3,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
     QPushButton, QLabel, QInputDialog, QColorDialog, QGroupBox,
-    QAbstractItemView, QMessageBox, QComboBox,
+    QAbstractItemView, QMessageBox, QComboBox, QSpinBox,
 )
 from PySide6.QtGui import QColor, QPixmap, QIcon
 from PySide6.QtCore import Signal, Qt
@@ -54,6 +54,20 @@ class LabelListWidget(QWidget):
         self._class_list.currentRowChanged.connect(self._on_class_row_changed)
         self._class_list.itemDoubleClicked.connect(self._on_class_double_clicked)
         classes_layout.addWidget(self._class_list)
+
+        id_layout = QHBoxLayout()
+        self._class_id_label = QLabel(tr("improved_class_id"))
+        self._class_id_spin = QSpinBox()
+        self._class_id_spin.setRange(-1, -1)
+        self._class_id_spin.setSpecialValueText("—")
+        self._class_id_spin.setEnabled(False)
+        self._class_id_spin.valueChanged.connect(self.select_class)
+        id_layout.addWidget(self._class_id_label)
+        id_layout.addWidget(self._class_id_spin)
+        classes_layout.addLayout(id_layout)
+        self._class_id_hint = QLabel(tr("improved_class_id_hint"))
+        self._class_id_hint.setWordWrap(True)
+        classes_layout.addWidget(self._class_id_hint)
 
         btn_layout = QHBoxLayout()
         self._add_btn = QPushButton(tr("label_add_class"))
@@ -116,13 +130,11 @@ class LabelListWidget(QWidget):
 
     def set_classes(self, classes: list[dict]):
         """Set class list. Each dict has 'name' and 'color' keys."""
-        self._classes = classes
-        self._refresh_class_list()
-        if classes:
-            self._class_list.setCurrentRow(0)
+        self._classes = [dict(cls) for cls in classes]
+        self._refresh_class_list(selected=0 if classes else -1)
 
     def get_classes(self) -> list[dict]:
-        return self._classes.copy()
+        return [dict(cls) for cls in self._classes]
 
     def get_class_count(self) -> int:
         return len(self._classes)
@@ -140,38 +152,48 @@ class LabelListWidget(QWidget):
     def selected_class_id(self) -> int:
         return self._class_list.currentRow()
 
-    def add_class(self, name: str, color: str = None) -> int:
+    def add_class(self, name: str, color: str = None, *, select: bool = True) -> int:
         """Add a class programmatically. Returns the new class index."""
         name = validate_class_name(name)
         # Check if already exists
         for i, cls in enumerate(self._classes):
             if cls["name"].casefold() == name.casefold():
+                if select:
+                    self.select_class(i)
                 return i
         if color is None:
             color_idx = len(self._classes) % len(DEFAULT_COLORS)
             color = DEFAULT_COLORS[color_idx]
         self._classes.append({"name": name, "color": color})
-        self._refresh_class_list()
-        self._class_list.setCurrentRow(len(self._classes) - 1)
+        previous = self.selected_class_id()
+        selected = len(self._classes) - 1 if select else max(0, previous)
+        self._refresh_class_list(selected=selected)
         self.classes_changed.emit()
         return len(self._classes) - 1
 
     def select_class(self, index: int):
-        """Select a class by index programmatically (without triggering class_selected signal)."""
+        """Select the stored class ID and synchronize every drawing tool."""
         if 0 <= index < self._class_list.count():
-            self._class_list.blockSignals(True)
             self._class_list.setCurrentRow(index)
-            self._class_list.blockSignals(False)
 
-    def _refresh_class_list(self):
+    def _refresh_class_list(self, selected=None):
+        if selected is None:
+            selected = self.selected_class_id()
+        self._class_list.blockSignals(True)
         self._class_list.clear()
-        for cls in self._classes:
-            item = QListWidgetItem(cls["name"])
+        for class_id, cls in enumerate(self._classes):
+            shortcut = str(class_id + 1) if class_id < 9 else "0" if class_id == 9 else "—"
+            item = QListWidgetItem(f"[{class_id}] {cls['name']}")
+            item.setToolTip(tr("improved_class_row_hint").format(id=class_id, key=shortcut))
             color = QColor(cls["color"])
             pixmap = QPixmap(16, 16)
             pixmap.fill(color)
             item.setIcon(QIcon(pixmap))
             self._class_list.addItem(item)
+        selected = min(max(0, selected), len(self._classes) - 1) if self._classes else -1
+        self._class_list.setCurrentRow(selected)
+        self._class_list.blockSignals(False)
+        self._on_class_row_changed(selected)
 
     def _on_add_class(self):
         name, ok = QInputDialog.getText(self, tr("label_add_class"), tr("label_class_name"))
@@ -199,8 +221,13 @@ class LabelListWidget(QWidget):
                 self.classes_changed.emit()
 
     def _on_class_row_changed(self, row: int):
-        if row >= 0:
-            self.class_selected.emit(row)
+        self._class_id_spin.blockSignals(True)
+        self._class_id_spin.setSpecialValueText("" if self._classes else "—")
+        self._class_id_spin.setRange(-1 if not self._classes else 0, len(self._classes) - 1)
+        self._class_id_spin.setValue(row)
+        self._class_id_spin.setEnabled(bool(self._classes))
+        self._class_id_spin.blockSignals(False)
+        self.class_selected.emit(row)
 
     def _on_class_double_clicked(self, item: QListWidgetItem):
         row = self._class_list.row(item)
@@ -300,6 +327,8 @@ class LabelListWidget(QWidget):
         self._refresh_instance_list()
 
     def clear_instances(self):
+        self._current_labels = []
+        self._visibility = []
         self._instance_list.clear()
         self._no_labels_label.show()
 
@@ -337,6 +366,9 @@ class LabelListWidget(QWidget):
 
     def retranslate(self):
         self._classes_group.setTitle(tr("label_classes_title"))
+        self._class_id_label.setText(tr("improved_class_id"))
+        self._class_id_hint.setText(tr("improved_class_id_hint"))
+        self._refresh_class_list()
         self._instances_group.setTitle(tr("label_instances_title"))
         self._add_btn.setText(tr("label_add_class"))
         self._remove_btn.setText(tr("label_remove_class"))

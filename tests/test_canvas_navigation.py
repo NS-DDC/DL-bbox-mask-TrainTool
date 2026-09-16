@@ -77,3 +77,16 @@ def test_space_left_drag_pans_in_drawing_modes(large_view):
     assert view.verticalScrollBar().value() > before
     assert forwarded == []
     assert not view._space_pan
+
+
+def test_space_double_click_does_not_finish_annotation(large_view):
+    view = large_view
+    finished = []
+    view.mouse_double_clicked.connect(lambda *args: finished.append(args))
+    view.set_right_drag_pan_enabled(False)
+    QTest.keyPress(view, Qt.Key.Key_Space)
+    QTest.mouseDClick(view.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, QPoint(150, 100))
+    QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton)
+    QTest.keyRelease(view, Qt.Key.Key_Space)
+    assert finished == []
